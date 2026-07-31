@@ -123,15 +123,26 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js",
-    "colyseus.js": "https://unpkg.com/colyseus.js@0.16.22/build/esm/index.mjs"
+    "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js"
   }
 }
 </script>
 
+<!--
+  colyseus.js se carga como script clásico (UMD), NO como módulo ES.
+  El build ESM del paquete (build/esm/index.mjs) depende internamente de otros
+  paquetes (@colyseus/schema, @colyseus/httpie, y hasta el paquete "ws" de Node)
+  que el navegador no puede resolver sin un bundler, y eso rompe el script entero
+  en silencio. Este build UMD (dist/colyseus.js) está pre-empaquetado y es
+  autocontenido: expone todo en window.Colyseus. Va justo antes del script
+  principal, para garantizar que window.Colyseus ya existe cuando este se ejecuta.
+-->
+<script src="https://unpkg.com/colyseus.js@0.16.22/dist/colyseus.js"></script>
+
 <script type="module">
 import * as THREE from 'three';
-import { Client, getStateCallbacks } from 'colyseus.js';
+// colyseus.js se carga arriba como <script> clásico (UMD) -> window.Colyseus
+const { Client, getStateCallbacks } = window.Colyseus;
 
 /* =========================================================
    SHADOW — Prototipo técnico Fase 1
@@ -145,12 +156,11 @@ const PLAYER_SPEED = 3.5;     // unidades/seg (ritmo de caminata; antes 9 se sen
 const CAMERA_DISTANCE = 18;
 const CAMERA_HEIGHT = 16;
 
-// URL del servidor de juego (Colyseus). Cambia esto por la URL de Render
-// una vez desplegado, ej: 'wss://shadow-server-px6w.onrender.com'
+// URL del servidor de juego (Colyseus). Ya apunta al servidor desplegado en Render.
 // En local (probando en el propio PC con el servidor corriendo) usa ws://localhost:2567
 const SERVER_URL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
   ? 'ws://localhost:2567'
-  : 'wss://shadow-server-px6w.onrender.com'; // <-- actualizar con la URL real de Render
+  : 'wss://shadow-server-px6w.onrender.com';
 
 // ---------- Escena base ----------
 const scene = new THREE.Scene();
