@@ -10,7 +10,7 @@
  * solo lee CreatureState y dibuja la posición/rotación que el servidor decide.
  */
 
-const AGGRO_RADIUS = 8;     // distancia a la que la criatura empieza a perseguir
+const AGGRO_RADIUS = 11;    // distancia a la que la criatura empieza a perseguir
 const LEASH_RADIUS = 16;    // si el jugador se aleja más que esto del punto de spawn, vuelve a patrullar
 const PATROL_SPEED = 1.2;   // más lento que el jugador (3.5) — se puede huir caminando
 const CHASE_SPEED = 2.6;    // más rápido que patrulla, pero aún más lento que el jugador

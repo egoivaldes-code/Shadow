@@ -111,7 +111,7 @@
 
 <div id="hud">
   <div id="title">Shadow <span>· prototipo</span></div>
-  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span></div>
+  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span><br>IA: <span id="aidebug">--</span></div>
 </div>
 
 <div id="hint">WASD / flechas para moverte<br>Arrastra en pantalla (móvil)</div>
@@ -692,6 +692,7 @@ const clock = new THREE.Clock();
 let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
 const fpsEl = document.getElementById('fps');
 const chunkEl = document.getElementById('chunkinfo');
+const aiDebugEl = document.getElementById('aidebug');
 
 function resolveCollisions(pos, obstacles) {
   for (const o of obstacles) {
@@ -781,6 +782,16 @@ function animate() {
     fpsTimer = 0;
   }
   chunkEl.textContent = `${pcx},${pcz} (${chunkManager.loaded.size} activos)`;
+
+  // Contador de depuración de IA: cuántas criaturas hay en cada estado.
+  // Útil para confirmar que el aggro funciona sin depender solo del color visual.
+  let patrolCount = 0, chaseCount = 0, deadCount = 0;
+  for (const entry of creatures.values()) {
+    if (entry.aiState === 'chase') chaseCount++;
+    else if (entry.aiState === 'dead') deadCount++;
+    else patrolCount++;
+  }
+  aiDebugEl.textContent = `${patrolCount} patrulla / ${chaseCount} persigue / ${deadCount} muertas`;
 }
 
 function lerpAngle(a, b, t) {
