@@ -63,6 +63,13 @@ class ShadowRoom extends Room {
     this.setState(new ShadowRoomState());
     this.maxClients = 50; // límite orientativo para esta fase de pruebas
 
+    // Por defecto, Colyseus destruye la sala si nadie completa la conexión
+    // en 15 segundos desde que se crea (this.seatReservationTime). En el plan
+    // gratuito de Render, el servidor puede tardar en "despertar" de estar
+    // dormido (cold start) más que eso, y la sala se autodestruía antes de que
+    // el jugador llegara a conectar de verdad. Lo ampliamos a un margen generoso.
+    this.seatReservationTime = 40;
+
     // Guardamos la última intención de movimiento por jugador.
     // El cliente manda esto muchas veces por segundo; el servidor
     // solo la aplica en su propio tick, para no depender de la frecuencia del cliente.

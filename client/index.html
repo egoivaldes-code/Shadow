@@ -498,8 +498,40 @@ const creatures = new Map();     // creatureId -> { group, targetX, targetZ, tar
 let room = null;
 let mySessionId = null;
 
+// El servidor en Render (plan free) puede estar "dormido" y tardar bastante en
+// despertar (cold start). Si intentamos unirnos a la sala directamente durante
+// ese arranque, Colyseus puede destruir la sala antes de que la conexión real
+// llegue a completarse. Por eso, primero hacemos una petición HTTP simple a
+// /health y reintentamos hasta que responda, y SOLO ENTONCES nos unimos a la
+// partida — así separamos "despertar el servidor" de "unirse a la partida".
+async function wakeUpServer(maxAttempts = 8) {
+  const httpBase = SERVER_URL.replace(/^ws/, 'http');
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    setNetStatus('connecting', `despertando servidor… (${attempt}/${maxAttempts})`);
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(`${httpBase}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) return true;
+    } catch (err) {
+      // Timeout o servidor aún dormido: seguimos reintentando.
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return false;
+}
+
 async function connectToServer() {
   setNetStatus('connecting', 'conectando…');
+
+  const awake = await wakeUpServer();
+  if (!awake) {
+    console.warn('[Shadow] El servidor no respondió tras varios intentos, jugando en modo local.');
+    setNetStatus('offline', 'sin servidor');
+    return;
+  }
+
   try {
     const client = new Client(SERVER_URL);
     room = await client.joinOrCreate('shadow_room', { name: 'Jugador' });
