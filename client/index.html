@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Shadow — Prototipo Fase 1</title>
+<title>Shadow — Prototipo Fase 2</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
@@ -53,6 +53,10 @@
     margin-top: 8px;
   }
   #title span { color: #7fe0a0; }
+
+  #netstatus.connected { color: #7fe0a0; }
+  #netstatus.connecting { color: #e0c97f; }
+  #netstatus.offline { color: #e07f7f; }
 
   /* Joystick virtual */
   #joystick-zone {
@@ -107,7 +111,7 @@
 
 <div id="hud">
   <div id="title">Shadow <span>· prototipo</span></div>
-  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span></div>
+  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span></div>
 </div>
 
 <div id="hint">WASD / flechas para moverte<br>Arrastra en pantalla (móvil)</div>
@@ -119,13 +123,15 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js"
+    "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.js",
+    "colyseus.js": "https://unpkg.com/colyseus.js@0.16.22/build/esm/index.mjs"
   }
 }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { Client, getStateCallbacks } from 'colyseus.js';
 
 /* =========================================================
    SHADOW — Prototipo técnico Fase 1
@@ -138,6 +144,13 @@ const CHUNK_SIZE = 128;       // metros por chunk (referencia GDD)
 const PLAYER_SPEED = 3.5;     // unidades/seg (ritmo de caminata; antes 9 se sentía como galope)
 const CAMERA_DISTANCE = 18;
 const CAMERA_HEIGHT = 16;
+
+// URL del servidor de juego (Colyseus). Cambia esto por la URL de Render
+// una vez desplegado, ej: 'wss://shadow-server.onrender.com'
+// En local (probando en el propio PC con el servidor corriendo) usa ws://localhost:2567
+const SERVER_URL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+  ? 'ws://localhost:2567'
+  : 'wss://shadow-server.onrender.com'; // <-- actualizar con la URL real de Render
 
 // ---------- Escena base ----------
 const scene = new THREE.Scene();
@@ -388,7 +401,104 @@ scene.add(player);
 
 const PLAYER_RADIUS = 0.45;
 
-// ---------- Input: teclado ----------
+// ---------- Red: conexión con el servidor Colyseus ----------
+// El servidor es la autoridad (docs/technical/Arquitectura_Inicial.md).
+// Este cliente sigue moviendo al jugador local de forma inmediata (para que
+// se sienta responsivo), pero además envía la intención de movimiento al
+// servidor, y dibuja a los DEMÁS jugadores exactamente donde el servidor dice.
+
+const netStatusEl = document.getElementById('netstatus');
+function setNetStatus(state, label) {
+  netStatusEl.className = state;
+  netStatusEl.textContent = label;
+}
+
+function createRemotePlayerMesh() {
+  const group = new THREE.Group();
+  const remoteBody = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.4, 0.9, 4, 8),
+    new THREE.MeshStandardMaterial({ color: 0x7fa8e0, roughness: 0.6 })
+  );
+  remoteBody.position.y = 0.85;
+  remoteBody.castShadow = true;
+  group.add(remoteBody);
+
+  const remoteFacing = new THREE.Mesh(
+    new THREE.ConeGeometry(0.18, 0.4, 6),
+    new THREE.MeshStandardMaterial({ color: 0xffffff })
+  );
+  remoteFacing.rotation.x = Math.PI / 2;
+  remoteFacing.position.set(0, 0.85, 0.55);
+  group.add(remoteFacing);
+
+  return group;
+}
+
+const remotePlayers = new Map(); // sessionId -> { group, targetX, targetZ, targetRotY }
+let room = null;
+let mySessionId = null;
+
+async function connectToServer() {
+  setNetStatus('connecting', 'conectando…');
+  try {
+    const client = new Client(SERVER_URL);
+    room = await client.joinOrCreate('shadow_room', { name: 'Jugador' });
+    mySessionId = room.sessionId;
+    setNetStatus('connected', 'conectado');
+
+    const $ = getStateCallbacks(room);
+    $(room.state).players.onAdd((playerState, sessionId) => {
+      if (sessionId === mySessionId) return; // no dibujar un duplicado de mí mismo
+      const group = createRemotePlayerMesh();
+      group.position.set(playerState.x, playerState.y, playerState.z);
+      scene.add(group);
+      const entry = { group, targetX: playerState.x, targetZ: playerState.z, targetRotY: playerState.rotationY };
+      remotePlayers.set(sessionId, entry);
+
+      $(playerState).onChange(() => {
+        entry.targetX = playerState.x;
+        entry.targetZ = playerState.z;
+        entry.targetRotY = playerState.rotationY;
+      });
+    });
+
+    $(room.state).players.onRemove((playerState, sessionId) => {
+      const entry = remotePlayers.get(sessionId);
+      if (entry) {
+        scene.remove(entry.group);
+        remotePlayers.delete(sessionId);
+      }
+    });
+
+    room.onLeave(() => setNetStatus('offline', 'desconectado'));
+
+  } catch (err) {
+    console.warn('[Shadow] No se pudo conectar al servidor, jugando en modo local:', err.message);
+    setNetStatus('offline', 'sin servidor');
+  }
+}
+
+connectToServer();
+
+// Limitamos la frecuencia de envío de input para no saturar el servidor
+// (el servidor igualmente simula a su propio ritmo, esto es solo la frecuencia de aviso).
+let lastInputSent = { x: 0, z: 0 };
+let netSendTimer = 0;
+const NET_SEND_INTERVAL = 0.05; // 20 veces/seg
+
+function sendInputToServer(inputX, inputZ, dt) {
+  if (!room) return;
+  netSendTimer += dt;
+  if (netSendTimer < NET_SEND_INTERVAL) return;
+  netSendTimer = 0;
+
+  if (inputX !== lastInputSent.x || inputZ !== lastInputSent.z) {
+    room.send('move', { dx: inputX, dz: inputZ });
+    lastInputSent = { x: inputX, z: inputZ };
+  }
+}
+
+
 const keys = { forward: false, back: false, left: false, right: false };
 const keyMap = {
   KeyW: 'forward', ArrowUp: 'forward',
@@ -509,12 +619,12 @@ function animate() {
 
   const inputLen = Math.hypot(inputX, inputZ);
   if (inputLen > 0.001) {
-    inputX /= Math.max(inputLen, 1);
-    inputZ /= Math.max(inputLen, 1);
+    const normX = inputX / Math.max(inputLen, 1);
+    const normZ = inputZ / Math.max(inputLen, 1);
 
     const move = new THREE.Vector3()
-      .addScaledVector(isoForward, -inputZ)
-      .addScaledVector(isoRight, inputX);
+      .addScaledVector(isoForward, -normZ)
+      .addScaledVector(isoRight, normX);
 
     if (move.lengthSq() > 0.0001) {
       move.normalize().multiplyScalar(PLAYER_SPEED * dt * Math.min(inputLen, 1));
@@ -525,6 +635,18 @@ function animate() {
       const targetAngle = Math.atan2(move.x, move.z);
       player.rotation.y = lerpAngle(player.rotation.y, targetAngle, 0.2);
     }
+  }
+
+  // Avisar al servidor de la intención de movimiento (throttle interno).
+  // El servidor decide la posición autoritativa; esto es solo la notificación.
+  sendInputToServer(inputX, inputZ, dt);
+
+  // Interpolar jugadores remotos hacia la última posición conocida del servidor,
+  // para que el movimiento se vea suave aunque los paquetes lleguen a ~20/seg.
+  for (const entry of remotePlayers.values()) {
+    entry.group.position.x += (entry.targetX - entry.group.position.x) * Math.min(1, dt * 10);
+    entry.group.position.z += (entry.targetZ - entry.group.position.z) * Math.min(1, dt * 10);
+    entry.group.rotation.y = lerpAngle(entry.group.rotation.y, entry.targetRotY, 0.2);
   }
 
   // Cargar/descargar chunks según posición del jugador
