@@ -135,9 +135,9 @@ import * as THREE from 'three';
 
 // ---------- Config ----------
 const CHUNK_SIZE = 128;       // metros por chunk (referencia GDD)
-const PLAYER_SPEED = 9;       // unidades/seg
-const CAMERA_DISTANCE = 24;
-const CAMERA_HEIGHT = 22;
+const PLAYER_SPEED = 3.5;     // unidades/seg (ritmo de caminata; antes 9 se sentía como galope)
+const CAMERA_DISTANCE = 18;
+const CAMERA_HEIGHT = 16;
 
 // ---------- Escena base ----------
 const scene = new THREE.Scene();
@@ -159,7 +159,7 @@ function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   const aspect = w / h;
-  const viewSize = 12;
+  const viewSize = 9;
   camera.left = -viewSize * aspect;
   camera.right = viewSize * aspect;
   camera.top = viewSize;
@@ -187,100 +187,183 @@ sun.shadow.camera.far = 120;
 sun.shadow.bias = -0.0015;
 scene.add(sun);
 
-// ---------- Terreno (1 chunk de referencia) ----------
-const groundGeo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 24, 24);
-groundGeo.rotateX(-Math.PI / 2);
-const groundMat = new THREE.MeshStandardMaterial({ color: 0x3a5a3f, roughness: 1 });
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.receiveShadow = true;
-scene.add(ground);
+// ---------- Sistema de chunks ----------
+// Cada chunk es una porción de CHUNK_SIZE x CHUNK_SIZE metros.
+// Se genera de forma determinista a partir de (chunkX, chunkZ) + WORLD_SEED,
+// así que el mismo chunk siempre produce el mismo contenido (sección 10 del GDD).
+// El ChunkManager carga los chunks cercanos al jugador y descarga los lejanos.
 
-// Rejilla sutil para leer distancia/escala (ayuda de desarrollo)
-const grid = new THREE.GridHelper(CHUNK_SIZE, 16, 0x2a4030, 0x2a4030);
-grid.position.y = 0.02;
-scene.add(grid);
+const WORLD_SEED = 1337;
+const LOAD_RADIUS = 1; // en chunks alrededor del jugador (radio 1 = grid 3x3)
 
-// Borde del chunk (referencia visual del límite 128x128)
-const chunkEdge = new THREE.LineSegments(
-  new THREE.EdgesGeometry(new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE).rotateX(-Math.PI/2)),
-  new THREE.LineBasicMaterial({ color: 0x7fe0a0, transparent: true, opacity: 0.25 })
-);
-chunkEdge.position.y = 0.03;
-scene.add(chunkEdge);
-
-// ---------- Objetos del mundo (InstancedMesh) ----------
-// Árboles: tronco (cilindro) + copa (cono), agrupados a mano como referencia visual.
-// A futuro esto vendrá de datos de chunk generados por semilla.
-
-const treePositions = [];
-const rockPositions = [];
-const rng = mulberry32(1337); // semilla estable, reproducible
-
-for (let i = 0; i < 40; i++) {
-  const x = (rng() - 0.5) * (CHUNK_SIZE - 10);
-  const z = (rng() - 0.5) * (CHUNK_SIZE - 10);
-  // Evitar spawnear objetos justo en el centro (zona de inicio del jugador)
-  if (Math.hypot(x, z) < 6) continue;
-  treePositions.push({ x, z, scale: 0.8 + rng() * 0.6, rot: rng() * Math.PI * 2 });
-}
-
-for (let i = 0; i < 22; i++) {
-  const x = (rng() - 0.5) * (CHUNK_SIZE - 10);
-  const z = (rng() - 0.5) * (CHUNK_SIZE - 10);
-  if (Math.hypot(x, z) < 5) continue;
-  rockPositions.push({ x, z, scale: 0.5 + rng() * 0.8, rot: rng() * Math.PI * 2 });
-}
-
-// Troncos
+// Geometrías y materiales compartidos (una sola vez, reutilizados por todos los chunks)
+const groundGeoShared = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 8, 8).rotateX(-Math.PI / 2);
+const groundMatShared = new THREE.MeshStandardMaterial({ color: 0x3a5a3f, roughness: 1 });
 const trunkGeo = new THREE.CylinderGeometry(0.25, 0.32, 1.6, 6);
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a3d2b, roughness: 0.9 });
-const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treePositions.length);
-trunkMesh.castShadow = true;
-
-// Copas
 const leafGeo = new THREE.ConeGeometry(1.3, 2.6, 7);
 const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 0.85 });
-const leafMesh = new THREE.InstancedMesh(leafGeo, leafMat, treePositions.length);
-leafMesh.castShadow = true;
-
-const dummy = new THREE.Object3D();
-treePositions.forEach((t, i) => {
-  dummy.position.set(t.x, 0.8 * t.scale, t.z);
-  dummy.rotation.y = t.rot;
-  dummy.scale.setScalar(t.scale);
-  dummy.updateMatrix();
-  trunkMesh.setMatrixAt(i, dummy.matrix);
-
-  dummy.position.set(t.x, 2.1 * t.scale, t.z);
-  dummy.updateMatrix();
-  leafMesh.setMatrixAt(i, dummy.matrix);
-});
-trunkMesh.instanceMatrix.needsUpdate = true;
-leafMesh.instanceMatrix.needsUpdate = true;
-scene.add(trunkMesh, leafMesh);
-
-// Rocas
 const rockGeo = new THREE.DodecahedronGeometry(0.9, 0);
 const rockMat = new THREE.MeshStandardMaterial({ color: 0x6b6f75, roughness: 1, flatShading: true });
-const rockMesh = new THREE.InstancedMesh(rockGeo, rockMat, rockPositions.length);
-rockMesh.castShadow = true;
-rockMesh.receiveShadow = true;
 
-rockPositions.forEach((r, i) => {
-  dummy.position.set(r.x, 0.4 * r.scale, r.z);
-  dummy.rotation.set(rng() * 0.3, r.rot, rng() * 0.3);
-  dummy.scale.setScalar(r.scale);
-  dummy.updateMatrix();
-  rockMesh.setMatrixAt(i, dummy.matrix);
-});
-rockMesh.instanceMatrix.needsUpdate = true;
-scene.add(rockMesh);
+const dummy = new THREE.Object3D();
 
-// Colisionadores simples (círculos en el plano XZ)
-const obstacles = [
-  ...treePositions.map(t => ({ x: t.x, z: t.z, r: 0.5 * t.scale })),
-  ...rockPositions.map(r => ({ x: r.x, z: r.z, r: 0.7 * r.scale })),
-];
+// Hash simple para combinar la semilla del mundo con coordenadas de chunk.
+// Así cada chunk tiene contenido distinto pero reproducible.
+function chunkSeed(cx, cz) {
+  return (WORLD_SEED ^ (cx * 374761393) ^ (cz * 668265263)) >>> 0;
+}
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+class Chunk {
+  constructor(cx, cz) {
+    this.cx = cx;
+    this.cz = cz;
+    this.group = new THREE.Group();
+    this.obstacles = []; // colisionadores en coordenadas de mundo (absolutas)
+
+    const originX = cx * CHUNK_SIZE;
+    const originZ = cz * CHUNK_SIZE;
+    this.group.position.set(originX, 0, originZ);
+
+    // Terreno
+    const ground = new THREE.Mesh(groundGeoShared, groundMatShared);
+    ground.receiveShadow = true;
+    this.group.add(ground);
+
+    // Borde del chunk (referencia visual de desarrollo)
+    const edge = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE).rotateX(-Math.PI / 2)),
+      new THREE.LineBasicMaterial({ color: 0x7fe0a0, transparent: true, opacity: 0.15 })
+    );
+    edge.position.y = 0.03;
+    this.group.add(edge);
+
+    // Generación procedural determinista de árboles y rocas
+    const rng = mulberry32(chunkSeed(cx, cz));
+    const treePositions = [];
+    const rockPositions = [];
+
+    for (let i = 0; i < 40; i++) {
+      const x = (rng() - 0.5) * (CHUNK_SIZE - 10);
+      const z = (rng() - 0.5) * (CHUNK_SIZE - 10);
+      // Reservamos el centro del chunk (0,0) como zona de spawn despejada
+      if (cx === 0 && cz === 0 && Math.hypot(x, z) < 6) continue;
+      treePositions.push({ x, z, scale: 0.8 + rng() * 0.6, rot: rng() * Math.PI * 2 });
+    }
+    for (let i = 0; i < 22; i++) {
+      const x = (rng() - 0.5) * (CHUNK_SIZE - 10);
+      const z = (rng() - 0.5) * (CHUNK_SIZE - 10);
+      if (cx === 0 && cz === 0 && Math.hypot(x, z) < 5) continue;
+      rockPositions.push({ x, z, scale: 0.5 + rng() * 0.8, rot: rng() * Math.PI * 2 });
+    }
+
+    if (treePositions.length > 0) {
+      const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treePositions.length);
+      const leafMesh = new THREE.InstancedMesh(leafGeo, leafMat, treePositions.length);
+      trunkMesh.castShadow = true;
+      leafMesh.castShadow = true;
+
+      treePositions.forEach((t, i) => {
+        dummy.position.set(t.x, 0.8 * t.scale, t.z);
+        dummy.rotation.set(0, t.rot, 0);
+        dummy.scale.setScalar(t.scale);
+        dummy.updateMatrix();
+        trunkMesh.setMatrixAt(i, dummy.matrix);
+
+        dummy.position.set(t.x, 2.1 * t.scale, t.z);
+        dummy.updateMatrix();
+        leafMesh.setMatrixAt(i, dummy.matrix);
+
+        this.obstacles.push({ x: originX + t.x, z: originZ + t.z, r: 0.5 * t.scale });
+      });
+      trunkMesh.instanceMatrix.needsUpdate = true;
+      leafMesh.instanceMatrix.needsUpdate = true;
+      this.group.add(trunkMesh, leafMesh);
+    }
+
+    if (rockPositions.length > 0) {
+      const rockMesh = new THREE.InstancedMesh(rockGeo, rockMat, rockPositions.length);
+      rockMesh.castShadow = true;
+      rockMesh.receiveShadow = true;
+
+      rockPositions.forEach((r, i) => {
+        dummy.position.set(r.x, 0.4 * r.scale, r.z);
+        dummy.rotation.set(rng() * 0.3, r.rot, rng() * 0.3);
+        dummy.scale.setScalar(r.scale);
+        dummy.updateMatrix();
+        rockMesh.setMatrixAt(i, dummy.matrix);
+
+        this.obstacles.push({ x: originX + r.x, z: originZ + r.z, r: 0.7 * r.scale });
+      });
+      rockMesh.instanceMatrix.needsUpdate = true;
+      this.group.add(rockMesh);
+    }
+  }
+
+  dispose() {
+    // InstancedMesh y PlaneGeometry compartidas no se destruyen (son reutilizadas),
+    // solo se saca el grupo de la escena. Si un chunk usara geometría única,
+    // aquí habría que llamar a geometry.dispose() / material.dispose().
+  }
+}
+
+class ChunkManager {
+  constructor(scene) {
+    this.scene = scene;
+    this.loaded = new Map(); // key "cx,cz" -> Chunk
+  }
+
+  key(cx, cz) { return `${cx},${cz}`; }
+
+  update(playerX, playerZ) {
+    const pcx = Math.floor((playerX + CHUNK_SIZE / 2) / CHUNK_SIZE);
+    const pcz = Math.floor((playerZ + CHUNK_SIZE / 2) / CHUNK_SIZE);
+
+    const needed = new Set();
+    for (let dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) {
+      for (let dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) {
+        const cx = pcx + dx;
+        const cz = pcz + dz;
+        const k = this.key(cx, cz);
+        needed.add(k);
+        if (!this.loaded.has(k)) {
+          const chunk = new Chunk(cx, cz);
+          this.scene.add(chunk.group);
+          this.loaded.set(k, chunk);
+        }
+      }
+    }
+
+    // Descargar chunks que ya no están en el radio
+    for (const [k, chunk] of this.loaded) {
+      if (!needed.has(k)) {
+        this.scene.remove(chunk.group);
+        chunk.dispose();
+        this.loaded.delete(k);
+      }
+    }
+
+    return { pcx, pcz };
+  }
+
+  getAllObstacles() {
+    const all = [];
+    for (const chunk of this.loaded.values()) all.push(...chunk.obstacles);
+    return all;
+  }
+}
+
+const chunkManager = new ChunkManager(scene);
+chunkManager.update(0, 0); // carga inicial en el spawn
 
 // ---------- Personaje (placeholder geométrico) ----------
 const player = new THREE.Group();
@@ -393,7 +476,7 @@ let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
 const fpsEl = document.getElementById('fps');
 const chunkEl = document.getElementById('chunkinfo');
 
-function resolveCollisions(pos) {
+function resolveCollisions(pos, obstacles) {
   for (const o of obstacles) {
     const dx = pos.x - o.x;
     const dz = pos.z - o.z;
@@ -405,10 +488,7 @@ function resolveCollisions(pos) {
       pos.z += (dz / dist) * push;
     }
   }
-  // Límite del chunk (referencia, no hay chunk vecino cargado aún)
-  const half = CHUNK_SIZE / 2 - 1;
-  pos.x = Math.max(-half, Math.min(half, pos.x));
-  pos.z = Math.max(-half, Math.min(half, pos.z));
+  // Sin límite de mundo: el terreno se extiende mientras haya chunks generados alrededor.
 }
 
 function animate() {
@@ -439,13 +519,16 @@ function animate() {
     if (move.lengthSq() > 0.0001) {
       move.normalize().multiplyScalar(PLAYER_SPEED * dt * Math.min(inputLen, 1));
       const nextPos = player.position.clone().add(move);
-      resolveCollisions(nextPos);
+      resolveCollisions(nextPos, chunkManager.getAllObstacles());
       player.position.copy(nextPos);
 
       const targetAngle = Math.atan2(move.x, move.z);
       player.rotation.y = lerpAngle(player.rotation.y, targetAngle, 0.2);
     }
   }
+
+  // Cargar/descargar chunks según posición del jugador
+  const { pcx, pcz } = chunkManager.update(player.position.x, player.position.z);
 
   camera.position.copy(player.position).add(cameraOffset);
   camera.lookAt(player.position.x, player.position.y + 1, player.position.z);
@@ -460,25 +543,13 @@ function animate() {
     fpsFrames = 0;
     fpsTimer = 0;
   }
-  const cx = Math.floor((player.position.x + CHUNK_SIZE / 2) / CHUNK_SIZE);
-  const cz = Math.floor((player.position.z + CHUNK_SIZE / 2) / CHUNK_SIZE);
-  chunkEl.textContent = `${cx},${cz}`;
+  chunkEl.textContent = `${pcx},${pcz} (${chunkManager.loaded.size} activos)`;
 }
 
 function lerpAngle(a, b, t) {
   let diff = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
   if (diff < -Math.PI) diff += Math.PI * 2;
   return a + diff * t;
-}
-
-// PRNG determinista para posiciones reproducibles del chunk
-function mulberry32(seed) {
-  return function () {
-    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 animate();
