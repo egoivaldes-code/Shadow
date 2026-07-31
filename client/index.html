@@ -444,7 +444,57 @@ function createRemotePlayerMesh() {
   return group;
 }
 
+// Criatura: cápsula más baja y alargada (a lo "lobo") + dos "orejas" (conos) para
+// distinguirla de un jugador de un vistazo, aún sin modelos GLB.
+const creatureBodyMat = new THREE.MeshStandardMaterial({ color: 0x9c5a4a, roughness: 0.8 });
+const creatureAlertMat = new THREE.MeshStandardMaterial({ color: 0xe0524a, roughness: 0.6, emissive: 0x3a0f0a, emissiveIntensity: 0.4 });
+
+function createCreatureMesh() {
+  const group = new THREE.Group();
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.6, 4, 8), creatureBodyMat.clone());
+  body.rotation.z = Math.PI / 2; // tumbada, como un cuerpo a cuatro patas visto de lado
+  body.position.y = 0.4;
+  body.castShadow = true;
+  group.add(body);
+
+  const earGeo = new THREE.ConeGeometry(0.1, 0.25, 5);
+  const earMat = new THREE.MeshStandardMaterial({ color: 0x6b3a2e });
+  const earL = new THREE.Mesh(earGeo, earMat);
+  earL.position.set(-0.12, 0.75, 0.35);
+  const earR = earL.clone();
+  earR.position.x = 0.12;
+  group.add(earL, earR);
+
+  // Barra de vida simple sobre la criatura. La cámara isométrica tiene un ángulo
+  // FIJO siempre (nunca orbita), así que basta con contrarrestar la rotación
+  // propia de la criatura para que la barra "mire" siempre hacia la cámara.
+  const billboard = new THREE.Group();
+  const hpBarBg = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.9, 0.12),
+    new THREE.MeshBasicMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.7 })
+  );
+  hpBarBg.position.set(0, 1.15, 0);
+  const hpBarFg = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.86, 0.08),
+    new THREE.MeshBasicMaterial({ color: 0xe0524a })
+  );
+  hpBarFg.position.set(0, 1.15, 0.001);
+  billboard.add(hpBarBg, hpBarFg);
+  group.add(billboard);
+
+  group.userData.body = body;
+  group.userData.billboard = billboard;
+  group.userData.hpBarFg = hpBarFg;
+  group.userData.hpBarBaseWidth = 0.86;
+
+  return group;
+}
+
+const ISO_BILLBOARD_ANGLE = Math.PI / 4; // ángulo fijo de la cámara isométrica (ver isoForward/isoRight)
+
 const remotePlayers = new Map(); // sessionId -> { group, targetX, targetZ, targetRotY }
+const creatures = new Map();     // creatureId -> { group, targetX, targetZ, targetRotY, aiState }
 let room = null;
 let mySessionId = null;
 
@@ -480,12 +530,59 @@ async function connectToServer() {
       }
     });
 
+    // Criaturas: el servidor decide posición, rotación, vida y estado de IA.
+    // El cliente solo dibuja e interpola — igual que con los jugadores remotos.
+    $(room.state).creatures.onAdd((creatureState, creatureId) => {
+      const group = createCreatureMesh();
+      group.position.set(creatureState.x, creatureState.y, creatureState.z);
+      scene.add(group);
+      const entry = {
+        group,
+        targetX: creatureState.x,
+        targetZ: creatureState.z,
+        targetRotY: creatureState.rotationY,
+        aiState: creatureState.aiState,
+      };
+      creatures.set(creatureId, entry);
+      updateCreatureVisuals(entry, creatureState);
+
+      $(creatureState).onChange(() => {
+        entry.targetX = creatureState.x;
+        entry.targetZ = creatureState.z;
+        entry.targetRotY = creatureState.rotationY;
+        entry.aiState = creatureState.aiState;
+        updateCreatureVisuals(entry, creatureState);
+      });
+    });
+
+    $(room.state).creatures.onRemove((creatureState, creatureId) => {
+      const entry = creatures.get(creatureId);
+      if (entry) {
+        scene.remove(entry.group);
+        creatures.delete(creatureId);
+      }
+    });
+
     room.onLeave(() => setNetStatus('offline', 'desconectado'));
 
   } catch (err) {
     console.warn('[Shadow] No se pudo conectar al servidor, jugando en modo local:', err.message);
     setNetStatus('offline', 'sin servidor');
   }
+}
+
+// Actualiza color (alerta si persigue) y barra de vida de una criatura.
+// Separado del onChange para poder llamarlo también al crearla (estado inicial).
+function updateCreatureVisuals(entry, creatureState) {
+  const body = entry.group.userData.body;
+  body.material = creatureState.aiState === 'chase' ? creatureAlertMat : creatureBodyMat;
+
+  const hpRatio = Math.max(0, creatureState.hp / creatureState.maxHp);
+  const hpBar = entry.group.userData.hpBarFg;
+  hpBar.scale.x = hpRatio;
+  hpBar.position.x = -(entry.group.userData.hpBarBaseWidth * (1 - hpRatio)) / 2;
+
+  entry.group.visible = creatureState.aiState !== 'dead';
 }
 
 connectToServer();
@@ -657,6 +754,14 @@ function animate() {
     entry.group.position.x += (entry.targetX - entry.group.position.x) * Math.min(1, dt * 10);
     entry.group.position.z += (entry.targetZ - entry.group.position.z) * Math.min(1, dt * 10);
     entry.group.rotation.y = lerpAngle(entry.group.rotation.y, entry.targetRotY, 0.2);
+  }
+
+  // Igual para criaturas: siguen siendo 100% decisión del servidor, aquí solo suavizamos.
+  for (const entry of creatures.values()) {
+    entry.group.position.x += (entry.targetX - entry.group.position.x) * Math.min(1, dt * 10);
+    entry.group.position.z += (entry.targetZ - entry.group.position.z) * Math.min(1, dt * 10);
+    entry.group.rotation.y = lerpAngle(entry.group.rotation.y, entry.targetRotY, 0.15);
+    entry.group.userData.billboard.rotation.y = ISO_BILLBOARD_ANGLE - entry.group.rotation.y;
   }
 
   // Cargar/descargar chunks según posición del jugador

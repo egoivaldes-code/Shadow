@@ -13,11 +13,49 @@
  *   - No hay chunks en el servidor todavía — todo el mundo es "una sala" única.
  */
 
+/**
+ * ShadowRoom — sala de juego mínima
+ *
+ * Responsabilidad de esta sala (según docs/technical/Arquitectura_Inicial.md):
+ *   - Es la AUTORIDAD sobre la posición de cada jugador y de cada criatura.
+ *   - El cliente ENVÍA una intención de movimiento ("quiero ir en esta dirección").
+ *   - El servidor VALIDA (por ahora solo clamp de velocidad) y actualiza el estado.
+ *   - Colyseus sincroniza automáticamente ese estado a todos los clientes conectados.
+ *
+ * Fase 3: se añaden criaturas con IA de patrulla/persecución (ver game/CreatureAI.js).
+ *
+ * Lo que esta sala NO hace todavía (vendrá en fases posteriores):
+ *   - No valida colisiones contra árboles/rocas del mundo (eso vive solo en cliente por ahora).
+ *   - No persiste nada en base de datos (Supabase vendrá más adelante).
+ *   - No hay chunks en el servidor todavía — todo el mundo es "una sala" única.
+ *   - No hay combate del jugador contra la criatura todavía — eso es el siguiente paso de la Fase 3.
+ */
+
 const { Room } = require('colyseus');
-const { ShadowRoomState, PlayerState } = require('../schema/ShadowRoomState');
+const { ShadowRoomState, PlayerState, CreatureState } = require('../schema/ShadowRoomState');
+const { Creature } = require('../game/CreatureAI');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
+
+// Puntos de spawn de criaturas de referencia, repartidos alrededor del origen
+// (mismo chunk 0,0 que ya genera el cliente). En una fase posterior esto vendrá
+// de datos de chunk en vez de estar escrito a mano.
+const CREATURE_SPAWNS = [
+  { x: 15, z: 8, kind: 'wolf' },
+  { x: -18, z: 12, kind: 'wolf' },
+  { x: 10, z: -20, kind: 'wolf' },
+  { x: -12, z: -15, kind: 'wolf' },
+];
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 class ShadowRoom extends Room {
 
@@ -29,6 +67,10 @@ class ShadowRoom extends Room {
     // El cliente manda esto muchas veces por segundo; el servidor
     // solo la aplica en su propio tick, para no depender de la frecuencia del cliente.
     this.inputs = new Map();
+
+    // Instancias de Creature (lógica de IA), indexadas igual que this.state.creatures
+    this.creatures = new Map();
+    this.spawnCreatures();
 
     this.onMessage('move', (client, message) => {
       // message esperado: { dx: number, dz: number } normalizado entre -1 y 1
@@ -51,9 +93,27 @@ class ShadowRoom extends Room {
     console.log('[ShadowRoom] Sala creada:', this.roomId);
   }
 
+  spawnCreatures() {
+    // Semilla fija por sala: reproducible mientras la sala viva, distinta entre salas.
+    const rng = mulberry32(Date.now() & 0xffffffff);
+
+    CREATURE_SPAWNS.forEach((spawn, i) => {
+      const id = `creature_${i}`;
+      const state = new CreatureState();
+      state.kind = spawn.kind;
+      this.state.creatures.set(id, state);
+
+      const creature = new Creature(id, state, spawn.x, spawn.z, rng);
+      this.creatures.set(id, creature);
+    });
+
+    console.log(`[ShadowRoom] ${this.creatures.size} criaturas generadas`);
+  }
+
   tick() {
     const dt = TICK_RATE_MS / 1000;
 
+    // --- Movimiento de jugadores ---
     for (const [sessionId, input] of this.inputs) {
       const player = this.state.players.get(sessionId);
       if (!player) continue;
@@ -68,6 +128,16 @@ class ShadowRoom extends Room {
       player.x += nx * MAX_SPEED * dt * speedFactor;
       player.z += nz * MAX_SPEED * dt * speedFactor;
       player.rotationY = Math.atan2(nx, nz);
+    }
+
+    // --- IA de criaturas ---
+    // Lista plana de jugadores vivos, para que cada criatura busque al más cercano.
+    const playerList = [];
+    for (const [sessionId, p] of this.state.players) {
+      playerList.push({ sessionId, x: p.x, z: p.z });
+    }
+    for (const creature of this.creatures.values()) {
+      creature.update(dt, playerList);
     }
   }
 
