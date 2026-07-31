@@ -139,6 +139,19 @@ class ShadowRoom extends Room {
     for (const creature of this.creatures.values()) {
       creature.update(dt, playerList);
     }
+
+    // Diagnóstico periódico (cada ~5s, no en cada tick): útil para confirmar en los
+    // logs de Render que el servidor está calculando distancias reales de aggro.
+    this._debugTimer = (this._debugTimer || 0) + dt;
+    if (this._debugTimer >= 5 && playerList.length > 0) {
+      this._debugTimer = 0;
+      for (const creature of this.creatures.values()) {
+        if (creature.state.aiState === 'dead') continue;
+        const nearest = creature.findNearestPlayer ? creature.findNearestPlayer(playerList) : null;
+        const distTxt = nearest ? nearest.dist.toFixed(1) : 'n/a';
+        console.log(`[Diag] ${creature.id} aiState=${creature.state.aiState} pos=(${creature.state.x.toFixed(1)},${creature.state.z.toFixed(1)}) jugador_mas_cercano_dist=${distTxt}`);
+      }
+    }
   }
 
   onJoin(client, options) {

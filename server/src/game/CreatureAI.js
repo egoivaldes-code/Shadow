@@ -33,7 +33,7 @@
  * solo lee CreatureState y dibuja la posición/rotación que el servidor decide.
  */
 
-const AGGRO_RADIUS = 10;        // radio para ENTRAR en la tabla de aggro (desde la criatura)
+const AGGRO_RADIUS = 14;        // radio para ENTRAR en la tabla de aggro (desde la criatura)
 const LEASH_RADIUS = 22;        // radio para SALIR de la tabla de aggro (desde el spawn) — bien separado de AGGRO_RADIUS
 const REAGGRO_COOLDOWN = 1.5;   // segundos de gracia tras salir de la tabla, antes de poder volver a entrar
 const PATROL_SPEED = 1.2;       // más lento que el jugador (3.5) — se puede huir caminando
@@ -124,6 +124,7 @@ class Creature {
       if (dist <= AGGRO_RADIUS) {
         this.aggroTable.set(p.sessionId, 1); // amenaza inicial
         this.state.aiState = 'combat';
+        console.log(`[IA] ${this.id} entra en COMBATE con ${p.sessionId} (dist=${dist.toFixed(1)}, radio=${AGGRO_RADIUS})`);
       }
     }
   }
@@ -155,12 +156,23 @@ class Creature {
       if (distToSpawn > LEASH_RADIUS) {
         this.aggroTable.delete(sessionId);
         this.reaggroCooldowns.set(sessionId, REAGGRO_COOLDOWN);
+        console.log(`[IA] ${this.id} pierde de vista a ${sessionId} (correa superada: ${distToSpawn.toFixed(1)} > ${LEASH_RADIUS})`);
         continue;
       }
       // Sigue en rango: acumula amenaza con el tiempo (base para cuando haya daño real)
       const current = this.aggroTable.get(sessionId) || 0;
       this.aggroTable.set(sessionId, current + THREAT_GAIN_PER_SEC * dt);
     }
+  }
+
+  // Solo para diagnóstico/logs — no participa en la lógica de aggro en sí.
+  findNearestPlayer(players) {
+    let best = null;
+    for (const p of players) {
+      const dist = Math.hypot(p.x - this.state.x, p.z - this.state.z);
+      if (!best || dist < best.dist) best = { sessionId: p.sessionId, dist };
+    }
+    return best;
   }
 
   pickHighestThreatTarget(players) {
@@ -179,6 +191,7 @@ class Creature {
   beginReturning() {
     this.state.aiState = 'returning';
     this.aggroTable.clear();
+    console.log(`[IA] ${this.id} sin objetivos, vuelve a casa (${this.spawnX.toFixed(1)},${this.spawnZ.toFixed(1)})`);
   }
 
   tickPatrol(dt) {
@@ -228,6 +241,7 @@ class Creature {
       this.state.hp = this.state.maxHp;
       this.state.aiState = 'patrol';
       this.waypoint = this.pickPatrolWaypoint();
+      console.log(`[IA] ${this.id} llegó a casa, curado y patrullando de nuevo`);
       return;
     }
 
