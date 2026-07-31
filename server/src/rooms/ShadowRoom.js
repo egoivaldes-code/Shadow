@@ -156,6 +156,9 @@ class ShadowRoom extends Room {
   onLeave(client, consented) {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
+    for (const creature of this.creatures.values()) {
+      creature.removePlayer(client.sessionId);
+    }
     console.log(`[ShadowRoom] ${client.sessionId} salió (${this.state.players.size} jugadores)`);
   }
 

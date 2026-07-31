@@ -575,7 +575,7 @@ async function connectToServer() {
 // Separado del onChange para poder llamarlo también al crearla (estado inicial).
 function updateCreatureVisuals(entry, creatureState) {
   const body = entry.group.userData.body;
-  body.material = creatureState.aiState === 'chase' ? creatureAlertMat : creatureBodyMat;
+  body.material = creatureState.aiState === 'combat' ? creatureAlertMat : creatureBodyMat;
 
   const hpRatio = Math.max(0, creatureState.hp / creatureState.maxHp);
   const hpBar = entry.group.userData.hpBarFg;
@@ -785,13 +785,14 @@ function animate() {
 
   // Contador de depuración de IA: cuántas criaturas hay en cada estado.
   // Útil para confirmar que el aggro funciona sin depender solo del color visual.
-  let patrolCount = 0, chaseCount = 0, deadCount = 0;
+  let patrolCount = 0, combatCount = 0, returningCount = 0, deadCount = 0;
   for (const entry of creatures.values()) {
-    if (entry.aiState === 'chase') chaseCount++;
+    if (entry.aiState === 'combat') combatCount++;
+    else if (entry.aiState === 'returning') returningCount++;
     else if (entry.aiState === 'dead') deadCount++;
     else patrolCount++;
   }
-  aiDebugEl.textContent = `${patrolCount} patrulla / ${chaseCount} persigue / ${deadCount} muertas`;
+  aiDebugEl.textContent = `${patrolCount} patrulla / ${combatCount} combate / ${returningCount} volviendo / ${deadCount} muertas`;
 }
 
 function lerpAngle(a, b, t) {
