@@ -9,7 +9,8 @@
  *                  demasiado, o se desconectaron); vuelve caminando a su spawn
  *                  exacto. No puede ser aggreada mientras vuelve (como el
  *                  "evade" de WoW). Al llegar, cura su vida y pasa a "patrol".
- *   - "dead":      hp <= 0. No simula nada (Fase 4 añadirá respawn/loot).
+ *   - "dead":      hp <= 0. No simula movimiento ni aggro; tras RESPAWN_TIME
+ *                  segundos, revive con vida completa en su punto de spawn.
  *
  * Tabla de aggro:
  *   Map<sessionId, threat> — cada jugador cercano entra con una amenaza inicial
@@ -43,6 +44,7 @@ const PATROL_RADIUS = 5;        // qué tan lejos del spawn patrulla
 const WAYPOINT_ARRIVAL_DIST = 0.5;
 const RETURN_ARRIVAL_DIST = 0.3;
 const THREAT_GAIN_PER_SEC = 1;  // cuánta amenaza acumula un jugador por segundo cerca (sin combate real todavía)
+const RESPAWN_TIME = 15;        // segundos muerta antes de revivir en su spawn
 
 class Creature {
   constructor(id, state, spawnX, spawnZ, rng) {
@@ -87,7 +89,11 @@ class Creature {
 
   // players: array de { sessionId, x, z } (jugadores conectados actualmente)
   update(dt, players) {
-    if (this.state.aiState === 'dead') return;
+    if (this.state.aiState === 'dead') {
+      this.deadTimer = (this.deadTimer || 0) + dt;
+      if (this.deadTimer >= RESPAWN_TIME) this.respawn();
+      return;
+    }
 
     this.tickCooldowns(dt);
 
@@ -220,7 +226,10 @@ class Creature {
     const dx = target.x - this.state.x;
     const dz = target.z - this.state.z;
     const dist = Math.hypot(dx, dz);
-    if (dist < 0.6) return; // ya está "encima" del jugador, no hace falta seguir empujando
+    // Se detiene a una distancia "de combate cuerpo a cuerpo" visible (1.3), no
+    // literalmente encima del jugador — si no, queda superpuesto con el modelo
+    // del jugador y es casi imposible verlo a simple vista en pantalla pequeña.
+    if (dist < 1.3) return;
 
     const nx = dx / dist;
     const nz = dz / dist;
@@ -259,7 +268,19 @@ class Creature {
     if (this.state.hp === 0) {
       this.state.aiState = 'dead';
       this.aggroTable.clear();
+      this.deadTimer = 0;
     }
+  }
+
+  respawn() {
+    this.state.x = this.spawnX;
+    this.state.z = this.spawnZ;
+    this.state.hp = this.state.maxHp;
+    this.state.aiState = 'patrol';
+    this.deadTimer = 0;
+    this.aggroTable.clear();
+    this.reaggroCooldowns.clear();
+    this.waypoint = this.pickPatrolWaypoint();
   }
 }
 

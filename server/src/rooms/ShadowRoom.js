@@ -37,6 +37,9 @@ const { Creature } = require('../game/CreatureAI');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
+const MELEE_RANGE = 2.2;     // distancia máxima para golpear (algo más que los 1.3 a los que la criatura se detiene)
+const ATTACK_DAMAGE = 5;     // daño por golpe (un lobo de 20 hp muere en 4 golpes)
+const ATTACK_COOLDOWN = 1.2; // segundos entre golpes automáticos
 
 // Puntos de spawn de criaturas de referencia, repartidos alrededor del origen
 // (mismo chunk 0,0 que ya genera el cliente). En una fase posterior esto vendrá
@@ -75,6 +78,10 @@ class ShadowRoom extends Room {
     // solo la aplica en su propio tick, para no depender de la frecuencia del cliente.
     this.inputs = new Map();
 
+    // Cooldown de ataque por jugador (segundos restantes hasta poder golpear de nuevo).
+    // Vive solo en el servidor, no se sincroniza — el cliente no necesita saberlo.
+    this.attackCooldowns = new Map();
+
     // Instancias de Creature (lógica de IA), indexadas igual que this.state.creatures
     this.creatures = new Map();
     this.spawnCreatures();
@@ -91,6 +98,26 @@ class ShadowRoom extends Room {
       if (player && typeof message?.name === 'string') {
         player.name = message.name.slice(0, 20); // evitar nombres absurdamente largos
       }
+    });
+
+    // "Modo guerra": el jugador activa esto con un botón. Mientras esté activo,
+    // si tiene un objetivo válido y está a rango, ataca automáticamente (con cooldown).
+    this.onMessage('setWarMode', (client, message) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      player.warMode = !!message?.active;
+      if (!player.warMode) player.targetId = ''; // salir de modo guerra suelta el objetivo
+    });
+
+    // El cliente manda esto al tocar una criatura en pantalla (solo tiene efecto
+    // real si el jugador está en modo guerra; el servidor no confía en el cliente
+    // para decidir si el objetivo es válido o está en rango, eso se revisa en tick()).
+    this.onMessage('setTarget', (client, message) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.warMode) return;
+      const targetId = typeof message?.targetId === 'string' ? message.targetId : '';
+      if (targetId && !this.state.creatures.has(targetId)) return; // objetivo inexistente, ignorar
+      player.targetId = targetId;
     });
 
     // Bucle de simulación del servidor — aquí es donde el servidor
@@ -147,6 +174,32 @@ class ShadowRoom extends Room {
       creature.update(dt, playerList);
     }
 
+    // --- Combate: ataque automático en modo guerra ---
+    // Reglas validadas por el servidor (nunca se confía en lo que "dice" el cliente):
+    // el jugador debe tener warMode activo, un targetId que apunte a una criatura
+    // viva, estar a MELEE_RANGE de distancia, y no estar en cooldown.
+    for (const [sessionId, remaining] of this.attackCooldowns) {
+      const next = remaining - dt;
+      if (next <= 0) this.attackCooldowns.delete(sessionId);
+      else this.attackCooldowns.set(sessionId, next);
+    }
+
+    for (const [sessionId, player] of this.state.players) {
+      if (!player.warMode || !player.targetId) continue;
+      const creature = this.creatures.get(player.targetId);
+      if (!creature || creature.state.aiState === 'dead') {
+        player.targetId = ''; // objetivo ya no válido (murió o no existe), soltar
+        continue;
+      }
+      if (this.attackCooldowns.has(sessionId)) continue; // aún recargando
+
+      const dist = Math.hypot(player.x - creature.state.x, player.z - creature.state.z);
+      if (dist > MELEE_RANGE) continue; // fuera de alcance, no golpea todavía
+
+      creature.takeDamage(ATTACK_DAMAGE, sessionId);
+      this.attackCooldowns.set(sessionId, ATTACK_COOLDOWN);
+    }
+
     // Diagnóstico periódico (cada ~5s, no en cada tick): útil para confirmar en los
     // logs de Render que el servidor está calculando distancias reales de aggro.
     this._debugTimer = (this._debugTimer || 0) + dt;
@@ -176,6 +229,7 @@ class ShadowRoom extends Room {
   onLeave(client, consented) {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
+    this.attackCooldowns.delete(client.sessionId);
     for (const creature of this.creatures.values()) {
       creature.removePlayer(client.sessionId);
     }

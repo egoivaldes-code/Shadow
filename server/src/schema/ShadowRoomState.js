@@ -19,6 +19,10 @@ class PlayerState extends Schema {
     this.z = 0;
     this.rotationY = 0;
     this.name = 'Jugador';
+    this.hp = 30;
+    this.maxHp = 30;
+    this.warMode = false;
+    this.targetId = ''; // id de la criatura objetivo, vacío si no hay
   }
 }
 defineTypes(PlayerState, {
@@ -27,6 +31,10 @@ defineTypes(PlayerState, {
   z: 'number',
   rotationY: 'number',
   name: 'string',
+  hp: 'number',
+  maxHp: 'number',
+  warMode: 'boolean',
+  targetId: 'string',
 });
 
 class CreatureState extends Schema {
@@ -38,7 +46,7 @@ class CreatureState extends Schema {
     this.rotationY = 0;
     this.hp = 20;
     this.maxHp = 20;
-    this.aiState = 'patrol'; // 'patrol' | 'chase' | 'dead'
+    this.aiState = 'patrol'; // 'patrol' | 'combat' | 'returning' | 'dead'
     this.kind = 'wolf';
   }
 }

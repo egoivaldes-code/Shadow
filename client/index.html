@@ -58,6 +58,33 @@
   #netstatus.connecting { color: #e0c97f; }
   #netstatus.offline { color: #e07f7f; }
 
+  #combat-warning {
+    position: fixed;
+    top: 70px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(160, 30, 20, 0.85);
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.03em;
+    padding: 8px 18px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.2);
+    z-index: 15;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  #combat-warning.visible {
+    opacity: 1;
+    animation: combat-pulse 0.8s ease-in-out infinite;
+  }
+  @keyframes combat-pulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.05); }
+  }
+
   /* Joystick virtual */
   #joystick-zone {
     position: fixed;
@@ -90,6 +117,31 @@
     transform: translate(-50%, -50%);
   }
 
+  #war-mode-btn {
+    position: fixed;
+    right: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 14px) + 90px);
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    background: rgba(160, 30, 20, 0.25);
+    border: 2px solid rgba(224, 82, 74, 0.6);
+    color: #e0524a;
+    font-size: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #war-mode-btn.active {
+    background: rgba(224, 82, 74, 0.9);
+    border-color: #fff;
+    color: #fff;
+    box-shadow: 0 0 16px rgba(224, 82, 74, 0.7);
+  }
+
   #hint {
     position: fixed;
     bottom: env(safe-area-inset-bottom, 14px);
@@ -113,6 +165,10 @@
   <div id="title">Shadow <span>· prototipo</span></div>
   <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span><br>IA: <span id="aidebug">--</span></div>
 </div>
+
+<div id="combat-warning">⚔ ¡Un enemigo te ataca!</div>
+
+<div id="war-mode-btn">⚔</div>
 
 <div id="hint">WASD / flechas para moverte<br>Arrastra en pantalla (móvil)</div>
 
@@ -483,10 +539,22 @@ function createCreatureMesh() {
   billboard.add(hpBarBg, hpBarFg);
   group.add(billboard);
 
+  // Anillo en el suelo que marca "esto es tu objetivo actual" — oculto por defecto,
+  // se activa/desactiva en el loop de animación comparando con currentTargetId.
+  const targetRing = new THREE.Mesh(
+    new THREE.RingGeometry(0.55, 0.68, 24),
+    new THREE.MeshBasicMaterial({ color: 0xff5544, side: THREE.DoubleSide, transparent: true, opacity: 0.9 })
+  );
+  targetRing.rotation.x = -Math.PI / 2;
+  targetRing.position.y = 0.03;
+  targetRing.visible = false;
+  group.add(targetRing);
+
   group.userData.body = body;
   group.userData.billboard = billboard;
   group.userData.hpBarFg = hpBarFg;
   group.userData.hpBarBaseWidth = 0.86;
+  group.userData.targetRing = targetRing;
 
   return group;
 }
@@ -567,6 +635,7 @@ async function connectToServer() {
     $(room.state).creatures.onAdd((creatureState, creatureId) => {
       const group = createCreatureMesh();
       group.position.set(creatureState.x, creatureState.y, creatureState.z);
+      group.userData.creatureId = creatureId; // para identificarla al hacer raycast de un toque
       scene.add(group);
       const entry = {
         group,
@@ -574,6 +643,7 @@ async function connectToServer() {
         targetZ: creatureState.z,
         targetRotY: creatureState.rotationY,
         aiState: creatureState.aiState,
+        lastHp: creatureState.hp,
       };
       creatures.set(creatureId, entry);
       updateCreatureVisuals(entry, creatureState);
@@ -583,6 +653,8 @@ async function connectToServer() {
         entry.targetZ = creatureState.z;
         entry.targetRotY = creatureState.rotationY;
         entry.aiState = creatureState.aiState;
+        if (creatureState.hp < entry.lastHp) flashHit(entry); // bajó la vida: acaba de recibir un golpe
+        entry.lastHp = creatureState.hp;
         updateCreatureVisuals(entry, creatureState);
       });
     });
@@ -615,6 +687,12 @@ function updateCreatureVisuals(entry, creatureState) {
   hpBar.position.x = -(entry.group.userData.hpBarBaseWidth * (1 - hpRatio)) / 2;
 
   entry.group.visible = creatureState.aiState !== 'dead';
+}
+
+// Pequeño "golpe" visual (escala + destello blanco) al recibir daño, para que
+// un ataque se sienta aunque el jugador no esté mirando la barra de vida.
+function flashHit(entry) {
+  entry.hitFlashTimer = 0.18; // segundos que dura el efecto, consumido en el loop de animación
 }
 
 connectToServer();
@@ -711,6 +789,60 @@ joyZone.addEventListener('mousedown', e => joyStart(e.clientX, e.clientY));
 window.addEventListener('mousemove', e => { if (joyActive) joyMove(e.clientX, e.clientY); });
 window.addEventListener('mouseup', () => joyEnd());
 
+// ---------- Modo guerra + selección de objetivo ----------
+// El botón activa/desactiva el modo guerra (el servidor es quien decide si
+// realmente se puede golpear: rango, cooldown, etc. — esto solo pide el estado).
+// Con el modo activo, tocar sobre una criatura en pantalla la marca como objetivo;
+// si además estás a rango cuerpo a cuerpo, el servidor golpea solo automáticamente.
+let warModeActive = false;
+let currentTargetId = '';
+
+const warModeBtn = document.getElementById('war-mode-btn');
+const raycaster = new THREE.Raycaster();
+
+function setWarMode(active) {
+  warModeActive = active;
+  warModeBtn.classList.toggle('active', warModeActive);
+  if (room) room.send('setWarMode', { active: warModeActive });
+  if (!warModeActive) {
+    currentTargetId = '';
+  }
+}
+
+warModeBtn.addEventListener('click', () => setWarMode(!warModeActive));
+
+function handleTapForTargeting(clientX, clientY) {
+  if (!warModeActive || !room) return;
+
+  const ndc = new THREE.Vector2(
+    (clientX / window.innerWidth) * 2 - 1,
+    -(clientY / window.innerHeight) * 2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+
+  const creatureBodies = [];
+  for (const entry of creatures.values()) {
+    if (entry.aiState === 'dead') continue;
+    creatureBodies.push(entry.group.userData.body);
+  }
+
+  const hits = raycaster.intersectObjects(creatureBodies, false);
+  if (hits.length === 0) return; // toque en el suelo o el vacío: no cambia nada
+
+  const hitGroup = hits[0].object.parent; // el body es hijo del group de la criatura
+  const creatureId = hitGroup.userData.creatureId;
+  if (!creatureId) return;
+
+  currentTargetId = creatureId;
+  room.send('setTarget', { targetId: creatureId });
+}
+
+// Escuchamos toques en el propio canvas (no en la zona del joystick, que ya
+// captura sus propios toques por estar encima en esa esquina).
+renderer.domElement.addEventListener('pointerdown', e => {
+  handleTapForTargeting(e.clientX, e.clientY);
+});
+
 // ---------- Cámara: offset fijo isométrico que sigue al jugador ----------
 const cameraOffset = new THREE.Vector3(CAMERA_DISTANCE, CAMERA_HEIGHT, CAMERA_DISTANCE);
 
@@ -725,6 +857,8 @@ let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
 const fpsEl = document.getElementById('fps');
 const chunkEl = document.getElementById('chunkinfo');
 const aiDebugEl = document.getElementById('aidebug');
+const combatWarningEl = document.getElementById('combat-warning');
+const COMBAT_WARNING_RADIUS = 5; // si una criatura en combate está a menos de esto de MI jugador, avisar
 
 function resolveCollisions(pos, obstacles) {
   for (const o of obstacles) {
@@ -795,6 +929,18 @@ function animate() {
     entry.group.position.z += (entry.targetZ - entry.group.position.z) * Math.min(1, dt * 10);
     entry.group.rotation.y = lerpAngle(entry.group.rotation.y, entry.targetRotY, 0.15);
     entry.group.userData.billboard.rotation.y = ISO_BILLBOARD_ANGLE - entry.group.rotation.y;
+
+    // Destello de golpe: un pequeño "punch" de escala que decae rápido
+    if (entry.hitFlashTimer > 0) {
+      entry.hitFlashTimer = Math.max(0, entry.hitFlashTimer - dt);
+      const punch = 1 + (entry.hitFlashTimer / 0.18) * 0.35;
+      entry.group.userData.body.scale.setScalar(punch);
+    } else if (entry.group.userData.body.scale.x !== 1) {
+      entry.group.userData.body.scale.setScalar(1);
+    }
+
+    // Anillo de objetivo: visible solo en la criatura que tengo marcada
+    entry.group.userData.targetRing.visible = (entry.group.userData.creatureId === currentTargetId);
   }
 
   // Cargar/descargar chunks según posición del jugador
@@ -818,13 +964,19 @@ function animate() {
   // Contador de depuración de IA: cuántas criaturas hay en cada estado.
   // Útil para confirmar que el aggro funciona sin depender solo del color visual.
   let patrolCount = 0, combatCount = 0, returningCount = 0, deadCount = 0;
+  let threatNearby = false;
   for (const entry of creatures.values()) {
-    if (entry.aiState === 'combat') combatCount++;
+    if (entry.aiState === 'combat') {
+      combatCount++;
+      const dist = Math.hypot(entry.group.position.x - player.position.x, entry.group.position.z - player.position.z);
+      if (dist <= COMBAT_WARNING_RADIUS) threatNearby = true;
+    }
     else if (entry.aiState === 'returning') returningCount++;
     else if (entry.aiState === 'dead') deadCount++;
     else patrolCount++;
   }
   aiDebugEl.textContent = `${patrolCount} patrulla / ${combatCount} combate / ${returningCount} volviendo / ${deadCount} muertas`;
+  combatWarningEl.classList.toggle('visible', threatNearby);
 }
 
 function lerpAngle(a, b, t) {
