@@ -1,9 +1,10 @@
 /**
- * Shadow — servidor de juego mínimo
+ * Shadow — servidor de juego
  *
- * Este es el servidor autoritativo descrito en docs/technical/Arquitectura_Inicial.md.
- * En esta fase (Fase 2) solo sincroniza posición entre jugadores conectados
- * a la misma sala. No hay chunks, combate, ni base de datos todavía.
+ * Servidor autoritativo (docs/technical/Arquitectura_Inicial.md): sincroniza
+ * posición, criaturas con IA de aggro, combate, loot, e inventario entre
+ * todos los jugadores conectados a la sala. Persiste personaje (posición,
+ * oro, vida, inventario) en Supabase — ver src/db/.
  *
  * Pensado para desplegarse en Render (free tier) — ver sección 7.3.1
  * del documento de contexto para detalles de esa decisión.

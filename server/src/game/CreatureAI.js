@@ -181,7 +181,10 @@ class Creature {
     return best;
   }
 
-  pickHighestThreatTarget(players) {
+  // Sessión con más amenaza acumulada en la tabla, o null si está vacía.
+  // Único punto de verdad — tanto el targeting de persecución como la
+  // asignación de dueño del loot se apoyan en este mismo cálculo.
+  getHighestThreatSessionId() {
     let bestSessionId = null;
     let bestThreat = -Infinity;
     for (const [sessionId, threat] of this.aggroTable) {
@@ -190,6 +193,11 @@ class Creature {
         bestSessionId = sessionId;
       }
     }
+    return bestSessionId;
+  }
+
+  pickHighestThreatTarget(players) {
+    const bestSessionId = this.getHighestThreatSessionId();
     if (!bestSessionId) return null;
     return players.find(p => p.sessionId === bestSessionId) || null;
   }
@@ -263,17 +271,7 @@ class Creature {
 
   // Devuelve el sessionId con más amenaza acumulada en la tabla (quien más daño
   // ha hecho), o null si la tabla está vacía. Usado para asignar el dueño del loot.
-  getHighestThreatSessionId() {
-    let bestSessionId = null;
-    let bestThreat = -Infinity;
-    for (const [sessionId, threat] of this.aggroTable) {
-      if (threat > bestThreat) {
-        bestThreat = threat;
-        bestSessionId = sessionId;
-      }
-    }
-    return bestSessionId;
-  }
+  // (Implementación compartida con pickHighestThreatTarget, ver arriba.)
 
   takeDamage(amount, attackerSessionId) {
     if (this.state.aiState === 'dead') return;

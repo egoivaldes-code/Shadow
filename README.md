@@ -19,12 +19,12 @@ No es una copia de Ultima Online. Es un homenaje a su filosofía modernizada con
 
 | Fase | Objetivo | Estado |
 |------|----------|--------|
-| **0** | Diseño, documentación, estructura | En progreso |
-| **1** | Prototipo técnico local (Three.js, cámara, movimiento) | Pendiente |
-| **2** | Sistema de chunks y streaming | Pendiente |
-| **3** | Gameplay mínimo (combate, inventario, guardado) | Pendiente |
-| **4** | Multijugador mínimo (sincronización de posiciones) | Pendiente |
-| **5** | Vertical slice (región completa, economía, PvP limitado) | Pendiente |
+| **0** | Diseño, documentación, estructura | ✅ Completa |
+| **1** | Prototipo técnico local (Three.js, cámara, movimiento) | ✅ Completa |
+| **2** | Sistema de chunks + servidor multijugador | ✅ Completa |
+| **3** | Gameplay (criaturas, combate, loot, inventario, persistencia) | ✅ Completa |
+| **4** | Profesiones, economía, NPCs vendedores | Pendiente |
+| **5** | Vertical slice (región completa, PvP limitado) | Pendiente |
 
 ## Documentación
 
@@ -57,22 +57,26 @@ Shadow se inspira en **Ultima Online** — no por su contenido específico, sino
 - Suno (música)
 - ElevenLabs (voces)
 
-## Estado actual (julio 2026)
+## Estado actual (agosto 2026)
 
 - ✅ Contexto y visión definidos
 - ✅ Arquitectura inicial documentada
-- ✅ Stack de hosting elegido (GitHub Pages + Supabase + Render)
-- ⏳ Estructura de carpetas creada
-- ⏳ GDD en desarrollo
-- ⏳ Prototipo Three.js pendiente
+- ✅ Stack de hosting elegido y desplegado (GitHub Pages + Supabase + Render)
+- ✅ Prototipo Three.js: cámara isométrica, movimiento (teclado + joystick táctil)
+- ✅ Sistema de chunks (carga/descarga dinámica alrededor del jugador)
+- ✅ Servidor multijugador (Colyseus) con reconexión automática tras cortes de red
+- ✅ Criaturas enemigas con IA de aggro (tabla de amenaza estilo WoW): patrulla, combate, vuelta a casa, respawn
+- ✅ Combate: modo guerra, targeting por toque, ataque automático en rango
+- ✅ Loot: bolsas con derecho exclusivo temporal, oro y objetos
+- ✅ Inventario (20 slots) con persistencia en Supabase
+- ✅ Persistencia de personaje: posición, vida, oro e inventario sobreviven a cerrar/recargar
 
 ## Próximos pasos
 
-1. Crear GDD inicial (secciones 1-5)
-2. Crear prototipo Three.js con cámara isométrica, movimiento, terreno
-3. Cargar en GitHub
-4. Publicar en GitHub Pages
-5. Validar rendimiento en móvil
+1. Profesión básica (minería o tala)
+2. NPC vendedor y economía básica
+3. Más variedad de criaturas/zonas
+4. Sistema de chunks también en el servidor (de momento el mundo es "una sala" única)
 
 ---
 
