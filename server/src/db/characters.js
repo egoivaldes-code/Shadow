@@ -31,6 +31,13 @@ async function loadCharacter(playerId) {
 async function saveCharacter(playerId, state) {
   if (!supabase || !playerId) return;
 
+  // El inventario vive como MapSchema en el estado sincronizado; para guardarlo
+  // en una columna JSONB lo convertimos a un array plano simple.
+  const inventory = [];
+  for (const slot of state.inventory.values()) {
+    inventory.push({ itemType: slot.itemType, name: slot.name, rarity: slot.rarity, quantity: slot.quantity });
+  }
+
   const { error } = await supabase
     .from('characters')
     .upsert({
@@ -42,13 +49,14 @@ async function saveCharacter(playerId, state) {
       gold: state.gold,
       hp: state.hp,
       max_hp: state.maxHp,
+      inventory,
       updated_at: new Date().toISOString(),
     });
 
   if (error) {
     console.error('[Supabase] Error guardando personaje:', error.message);
   } else {
-    console.log(`[Supabase] Personaje ${playerId} guardado (oro=${state.gold})`);
+    console.log(`[Supabase] Personaje ${playerId} guardado (oro=${state.gold}, objetos=${inventory.length})`);
   }
 }
 

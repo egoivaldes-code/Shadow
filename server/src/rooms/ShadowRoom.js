@@ -17,9 +17,10 @@
  */
 
 const { Room } = require('colyseus');
-const { ShadowRoomState, PlayerState, CreatureState, LootItemState, LootBagState } = require('../schema/ShadowRoomState');
+const { ShadowRoomState, PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState } = require('../schema/ShadowRoomState');
 const { Creature } = require('../game/CreatureAI');
 const { loadCharacter, saveCharacter } = require('../db/characters');
+const { MAX_INVENTORY_SLOTS, rollDrops, getItemDefinition } = require('../game/items');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
@@ -186,8 +187,22 @@ class ShadowRoom extends Room {
     goldItem.amount = goldAmount;
     bag.items.set(goldItem.itemId, goldItem);
 
+    // Objetos según la tabla de drops del tipo de criatura (piel, colmillo, etc.)
+    const drops = rollDrops(creature.state.kind);
+    drops.forEach((drop, i) => {
+      const def = getItemDefinition(drop.itemType);
+      const item = new LootItemState();
+      item.itemId = `${bagId}_item_${i}`;
+      item.kind = 'item';
+      item.itemType = drop.itemType;
+      item.name = def.name;
+      item.rarity = def.rarity;
+      item.amount = drop.amount;
+      bag.items.set(item.itemId, item);
+    });
+
     this.state.lootBags.set(bagId, bag);
-    console.log(`[Loot] Bolsa ${bagId} creada en (${bag.x.toFixed(1)},${bag.z.toFixed(1)}) — dueño: ${bag.ownerSessionId || 'nadie'}, oro=${goldAmount}`);
+    console.log(`[Loot] Bolsa ${bagId} creada en (${bag.x.toFixed(1)},${bag.z.toFixed(1)}) — dueño: ${bag.ownerSessionId || 'nadie'}, oro=${goldAmount}, objetos=${drops.map(d => d.itemType).join(',') || 'ninguno'}`);
   }
 
   handleTakeLootItem(client, message) {
@@ -215,8 +230,25 @@ class ShadowRoom extends Room {
 
     if (item.kind === 'gold') {
       player.gold += item.amount;
+    } else if (item.kind === 'item') {
+      const existing = player.inventory.get(item.itemType);
+      if (existing) {
+        // Ya tienes ese tipo de objeto: se apila, no ocupa slot nuevo.
+        existing.quantity += item.amount;
+      } else if (player.inventory.size < MAX_INVENTORY_SLOTS) {
+        const slot = new InventorySlotState();
+        slot.itemType = item.itemType;
+        slot.name = item.name;
+        slot.rarity = item.rarity;
+        slot.quantity = item.amount;
+        player.inventory.set(item.itemType, slot);
+      } else {
+        // Inventario lleno (20 tipos distintos): avisamos al cliente y no
+        // quitamos el objeto de la bolsa, para que pueda volver a por él luego.
+        client.send('inventoryFull', { itemName: item.name });
+        return;
+      }
     }
-    // (futuros tipos de item: añadir al inventario del jugador aquí)
 
     bag.items.delete(itemId);
     if (bag.items.size === 0) {
@@ -327,7 +359,19 @@ class ShadowRoom extends Room {
       player.hp = saved.hp;
       player.maxHp = saved.max_hp;
       if (saved.name) player.name = saved.name;
-      console.log(`[ShadowRoom] Personaje restaurado para ${playerId}: oro=${saved.gold}, pos=(${saved.x.toFixed(1)},${saved.z.toFixed(1)})`);
+
+      if (Array.isArray(saved.inventory)) {
+        for (const slotData of saved.inventory) {
+          const slot = new InventorySlotState();
+          slot.itemType = slotData.itemType;
+          slot.name = slotData.name;
+          slot.rarity = slotData.rarity;
+          slot.quantity = slotData.quantity;
+          player.inventory.set(slotData.itemType, slot);
+        }
+      }
+
+      console.log(`[ShadowRoom] Personaje restaurado para ${playerId}: oro=${saved.gold}, objetos=${(saved.inventory || []).length}, pos=(${saved.x.toFixed(1)},${saved.z.toFixed(1)})`);
     }
 
     this.state.players.set(client.sessionId, player);

@@ -11,6 +11,26 @@
 
 const { Schema, MapSchema, defineTypes } = require('@colyseus/schema');
 
+// Un "slot" de inventario: agrupa todas las unidades del MISMO tipo de objeto
+// en una sola entrada apilable (p.ej. "3x Piel de lobo" es un slot, no tres).
+// El límite de MAX_INVENTORY_SLOTS (ver items.js) se aplica sobre el número
+// de TIPOS distintos que llevas, no sobre la cantidad total de objetos.
+class InventorySlotState extends Schema {
+  constructor() {
+    super();
+    this.itemType = '';  // id interno, p.ej. 'wolf_pelt'
+    this.name = '';      // nombre para mostrar, p.ej. 'Piel de lobo'
+    this.rarity = 'common'; // 'common' | 'rare' (de momento)
+    this.quantity = 0;
+  }
+}
+defineTypes(InventorySlotState, {
+  itemType: 'string',
+  name: 'string',
+  rarity: 'string',
+  quantity: 'number',
+});
+
 class PlayerState extends Schema {
   constructor() {
     super();
@@ -24,6 +44,7 @@ class PlayerState extends Schema {
     this.warMode = false;
     this.targetId = ''; // id de la criatura objetivo, vacío si no hay
     this.gold = 0;
+    this.inventory = new MapSchema(); // itemType -> InventorySlotState
   }
 }
 defineTypes(PlayerState, {
@@ -37,22 +58,29 @@ defineTypes(PlayerState, {
   warMode: 'boolean',
   targetId: 'string',
   gold: 'number',
+  inventory: { map: InventorySlotState },
 });
 
-// Un objeto individual dentro de una bolsa de loot. De momento solo existe
-// el tipo "gold"; está preparado para añadir tipos de item/material después
-// (sección 16 del GDD) sin tener que rehacer el esquema.
+// Un objeto individual dentro de una bolsa de loot. "gold" es un caso especial
+// (se suma directo al oro del jugador); "item" representa un objeto real de
+// inventario, identificado por itemType (ver items.js para el catálogo).
 class LootItemState extends Schema {
   constructor() {
     super();
-    this.itemId = '';   // id único dentro de la bolsa, para poder coger uno concreto
-    this.kind = 'gold'; // 'gold' | (futuro: 'item', 'material', ...)
+    this.itemId = '';    // id único dentro de la bolsa, para poder coger uno concreto
+    this.kind = 'gold';  // 'gold' | 'item'
+    this.itemType = '';  // solo si kind==='item', p.ej. 'wolf_pelt'
+    this.name = '';      // nombre para mostrar en el panel de saqueo
+    this.rarity = 'common';
     this.amount = 0;
   }
 }
 defineTypes(LootItemState, {
   itemId: 'string',
   kind: 'string',
+  itemType: 'string',
+  name: 'string',
+  rarity: 'string',
   amount: 'number',
 });
 
@@ -112,4 +140,4 @@ defineTypes(ShadowRoomState, {
   lootBags: { map: LootBagState },
 });
 
-module.exports = { PlayerState, CreatureState, LootItemState, LootBagState, ShadowRoomState };
+module.exports = { PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState, ShadowRoomState };

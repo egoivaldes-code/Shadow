@@ -17,6 +17,7 @@ create table if not exists characters (
   gold       integer not null default 0,
   hp         integer not null default 30,
   max_hp     integer not null default 30,
+  inventory  jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

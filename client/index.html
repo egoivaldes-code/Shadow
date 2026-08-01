@@ -58,7 +58,7 @@
   #netstatus.connecting { color: #e0c97f; }
   #netstatus.offline { color: #e07f7f; }
 
-  #loot-panel {
+  #loot-panel, #inventory-panel {
     position: fixed;
     left: 50%;
     top: 50%;
@@ -72,8 +72,8 @@
     display: none;
     color: #e8e6df;
   }
-  #loot-panel.visible { display: block; }
-  #loot-panel h3 {
+  #loot-panel.visible, #inventory-panel.visible { display: block; }
+  #loot-panel h3, #inventory-panel h3 {
     font-size: 14px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -81,7 +81,7 @@
     margin-bottom: 10px;
     text-align: center;
   }
-  #loot-panel .loot-item {
+  #loot-panel .loot-item, #inventory-panel .loot-item {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -91,7 +91,8 @@
     margin-bottom: 6px;
     font-size: 13px;
   }
-  #loot-panel .loot-item button {
+  #inventory-panel .loot-item.rare { border: 1px solid rgba(90, 140, 212, 0.6); }
+  #loot-panel .loot-item button, #inventory-panel .loot-item button {
     background: rgba(212, 175, 90, 0.85);
     border: none;
     border-radius: 5px;
@@ -100,13 +101,13 @@
     padding: 5px 12px;
     font-size: 12px;
   }
-  #loot-panel .loot-empty {
+  #loot-panel .loot-empty, #inventory-panel .loot-empty {
     text-align: center;
     font-size: 12px;
     color: rgba(255,255,255,0.5);
     padding: 8px 0;
   }
-  #loot-panel .loot-close {
+  #loot-panel .loot-close, #inventory-panel .loot-close {
     display: block;
     margin: 10px auto 0;
     background: none;
@@ -143,6 +144,25 @@
     0%, 100% { transform: translateX(-50%) scale(1); }
     50% { transform: translateX(-50%) scale(1.05); }
   }
+
+  #inventory-full-warning {
+    position: fixed;
+    top: 70px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(80, 60, 20, 0.9);
+    color: #ffd77a;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 8px 18px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,215,122,0.4);
+    z-index: 15;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+  }
+  #inventory-full-warning.visible { opacity: 1; }
 
   /* Joystick virtual */
   #joystick-zone {
@@ -201,6 +221,25 @@
     box-shadow: 0 0 16px rgba(224, 82, 74, 0.7);
   }
 
+  #inventory-btn {
+    position: fixed;
+    right: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 14px) + 168px);
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(40, 30, 20, 0.55);
+    border: 2px solid rgba(212, 175, 90, 0.6);
+    color: #d4af5a;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   #hint {
     position: fixed;
     bottom: env(safe-area-inset-bottom, 14px);
@@ -231,9 +270,18 @@
   <button class="loot-close" id="loot-close-btn">Cerrar</button>
 </div>
 
+<div id="inventory-panel">
+  <h3>Inventario</h3>
+  <div id="inventory-items"></div>
+  <button class="loot-close" id="inventory-close-btn">Cerrar</button>
+</div>
+
+<div id="inventory-full-warning"></div>
+
 <div id="combat-warning">⚔ ¡Un enemigo te ataca!</div>
 
 <div id="war-mode-btn">⚔</div>
+<div id="inventory-btn">🎒</div>
 
 <div id="hint">WASD / flechas para moverte<br>Arrastra en pantalla (móvil)</div>
 
@@ -713,6 +761,10 @@ function clearRemoteEntities() {
 function attachRoomHandlers(room) {
   const $ = getStateCallbacks(room);
 
+  room.onMessage('inventoryFull', (msg) => {
+    showInventoryFullWarning(msg.itemName);
+  });
+
   $(room.state).players.onAdd((playerState, sessionId) => {
     if (sessionId === mySessionId) {
       // Este es mi propio jugador: no dibujamos un duplicado, pero sí nos
@@ -720,6 +772,14 @@ function attachRoomHandlers(room) {
       // que haya llegado del servidor, que puede tardar un instante tras unirse).
       goldEl.textContent = playerState.gold;
       $(playerState).onChange(() => { goldEl.textContent = playerState.gold; });
+
+      // Inventario: si el panel está abierto, se refresca en vivo al coger
+      // un objeto nuevo, o al apilar más cantidad de uno que ya tenías.
+      $(playerState).inventory.onAdd((slotState) => {
+        if (inventoryPanelOpen) renderInventoryPanel();
+        $(slotState).onChange(() => { if (inventoryPanelOpen) renderInventoryPanel(); });
+      });
+      $(playerState).inventory.onRemove(() => { if (inventoryPanelOpen) renderInventoryPanel(); });
       return;
     }
     const group = createRemotePlayerMesh();
@@ -1118,14 +1178,60 @@ function renderLootPanel() {
   lootItemsEl.innerHTML = '';
   for (const [itemId, item] of items) {
     const row = document.createElement('div');
-    row.className = 'loot-item';
-    const label = item.kind === 'gold' ? `🪙 ${item.amount} de oro` : `${item.kind} x${item.amount}`;
+    row.className = 'loot-item' + (item.rarity === 'rare' ? ' rare' : '');
+    const label = item.kind === 'gold' ? `🪙 ${item.amount} de oro` : `${item.name} x${item.amount}`;
     row.innerHTML = `<span>${label}</span><button>Coger</button>`;
     row.querySelector('button').addEventListener('click', () => {
       room.send('takeLootItem', { bagId: openLootBagId, itemId });
     });
     lootItemsEl.appendChild(row);
   }
+}
+
+// ---------- Panel de inventario ----------
+const inventoryPanelEl = document.getElementById('inventory-panel');
+const inventoryItemsEl = document.getElementById('inventory-items');
+const inventoryBtn = document.getElementById('inventory-btn');
+const inventoryFullWarningEl = document.getElementById('inventory-full-warning');
+let inventoryPanelOpen = false;
+
+inventoryBtn.addEventListener('click', () => {
+  inventoryPanelOpen = !inventoryPanelOpen;
+  inventoryPanelEl.classList.toggle('visible', inventoryPanelOpen);
+  if (inventoryPanelOpen) renderInventoryPanel();
+});
+document.getElementById('inventory-close-btn').addEventListener('click', () => {
+  inventoryPanelOpen = false;
+  inventoryPanelEl.classList.remove('visible');
+});
+
+// Se llama cada vez que cambia mi propio inventario, y también al abrir el panel.
+function renderInventoryPanel() {
+  if (!room) return;
+  const me = room.state.players.get(mySessionId);
+  if (!me) return;
+
+  const slots = [...me.inventory.values()];
+  if (slots.length === 0) {
+    inventoryItemsEl.innerHTML = '<div class="loot-empty">No llevas ningún objeto</div>';
+    return;
+  }
+
+  inventoryItemsEl.innerHTML = '';
+  for (const slot of slots) {
+    const row = document.createElement('div');
+    row.className = 'loot-item' + (slot.rarity === 'rare' ? ' rare' : '');
+    row.innerHTML = `<span>${slot.name}</span><span>x${slot.quantity}</span>`;
+    inventoryItemsEl.appendChild(row);
+  }
+}
+
+let inventoryFullTimer = null;
+function showInventoryFullWarning(itemName) {
+  inventoryFullWarningEl.textContent = `Inventario lleno — no se pudo coger "${itemName}"`;
+  inventoryFullWarningEl.classList.add('visible');
+  clearTimeout(inventoryFullTimer);
+  inventoryFullTimer = setTimeout(() => inventoryFullWarningEl.classList.remove('visible'), 3000);
 }
 
 // Escuchamos toques en el propio canvas (no en la zona del joystick, que ya
