@@ -694,6 +694,164 @@ function getOrCreatePlayerId() {
   return id;
 }
 
+// Limpia todas las entidades remotas dibujadas (jugadores, criaturas, bolsas)
+// antes de volver a sincronizar tras una reconexión — evita duplicados si el
+// estado se vuelve a decodificar entero desde cero.
+function clearRemoteEntities() {
+  for (const entry of remotePlayers.values()) scene.remove(entry.group);
+  remotePlayers.clear();
+  for (const entry of creatures.values()) scene.remove(entry.group);
+  creatures.clear();
+  for (const entry of lootBags.values()) scene.remove(entry.group);
+  lootBags.clear();
+  closeLootPanel();
+}
+
+// Conecta todos los listeners de sincronización de estado a una sala ya
+// unida/reconectada. Se llama tanto en la conexión inicial como tras
+// recuperar una sesión, para no duplicar esta lógica.
+function attachRoomHandlers(room) {
+  const $ = getStateCallbacks(room);
+
+  $(room.state).players.onAdd((playerState, sessionId) => {
+    if (sessionId === mySessionId) {
+      // Este es mi propio jugador: no dibujamos un duplicado, pero sí nos
+      // suscribimos a mi oro (esperar a onAdd evita leer el estado antes de
+      // que haya llegado del servidor, que puede tardar un instante tras unirse).
+      goldEl.textContent = playerState.gold;
+      $(playerState).onChange(() => { goldEl.textContent = playerState.gold; });
+      return;
+    }
+    const group = createRemotePlayerMesh();
+    group.position.set(playerState.x, playerState.y, playerState.z);
+    scene.add(group);
+    const entry = { group, targetX: playerState.x, targetZ: playerState.z, targetRotY: playerState.rotationY };
+    remotePlayers.set(sessionId, entry);
+
+    $(playerState).onChange(() => {
+      entry.targetX = playerState.x;
+      entry.targetZ = playerState.z;
+      entry.targetRotY = playerState.rotationY;
+    });
+  });
+
+  $(room.state).players.onRemove((playerState, sessionId) => {
+    const entry = remotePlayers.get(sessionId);
+    if (entry) {
+      scene.remove(entry.group);
+      remotePlayers.delete(sessionId);
+    }
+  });
+
+  // Criaturas: el servidor decide posición, rotación, vida y estado de IA.
+  // El cliente solo dibuja e interpola — igual que con los jugadores remotos.
+  $(room.state).creatures.onAdd((creatureState, creatureId) => {
+    const group = createCreatureMesh();
+    group.position.set(creatureState.x, creatureState.y, creatureState.z);
+    group.userData.creatureId = creatureId; // para identificarla al hacer raycast de un toque
+    scene.add(group);
+    const entry = {
+      group,
+      targetX: creatureState.x,
+      targetZ: creatureState.z,
+      targetRotY: creatureState.rotationY,
+      aiState: creatureState.aiState,
+      lastHp: creatureState.hp,
+    };
+    creatures.set(creatureId, entry);
+    updateCreatureVisuals(entry, creatureState);
+
+    $(creatureState).onChange(() => {
+      entry.targetX = creatureState.x;
+      entry.targetZ = creatureState.z;
+      entry.targetRotY = creatureState.rotationY;
+      entry.aiState = creatureState.aiState;
+      if (creatureState.hp < entry.lastHp) flashHit(entry); // bajó la vida: acaba de recibir un golpe
+      entry.lastHp = creatureState.hp;
+      updateCreatureVisuals(entry, creatureState);
+    });
+  });
+
+  $(room.state).creatures.onRemove((creatureState, creatureId) => {
+    const entry = creatures.get(creatureId);
+    if (entry) {
+      scene.remove(entry.group);
+      creatures.delete(creatureId);
+    }
+  });
+
+  // Bolsas de loot: aparecen al morir una criatura, desaparecen al vaciarse
+  // (o cuando alguien se lleva el último objeto). El contenido en sí (oro,
+  // futuros items) se lee directamente del estado sincronizado al abrir el panel.
+  $(room.state).lootBags.onAdd((bagState, bagId) => {
+    const group = createLootBagMesh();
+    group.position.set(bagState.x, 0, bagState.z);
+    group.userData.bagId = bagId;
+    scene.add(group);
+    lootBags.set(bagId, { group, state: bagState });
+
+    // Si tenemos el panel de esta bolsa abierto y alguien coge algo (incluido
+    // nosotros mismos), refrescamos la lista para que no se quede desactualizada.
+    $(bagState).items.onAdd(() => { if (openLootBagId === bagId) renderLootPanel(); });
+    $(bagState).items.onRemove(() => { if (openLootBagId === bagId) renderLootPanel(); });
+  });
+
+  $(room.state).lootBags.onRemove((bagState, bagId) => {
+    const entry = lootBags.get(bagId);
+    if (entry) {
+      scene.remove(entry.group);
+      lootBags.delete(bagId);
+    }
+    // Si la bolsa que teníamos abierta en el panel desaparece (se vació), cerramos el panel.
+    if (openLootBagId === bagId) closeLootPanel();
+  });
+}
+
+// Tras un corte inesperado, reintenta recuperar la MISMA sesión unas cuantas
+// veces antes de rendirse y quedarse en modo local. Usa el mismo token que
+// guardamos al conectar — el servidor mantiene la sesión viva unos segundos
+// (ver RECONNECTION_GRACE_SECONDS en el servidor) esperando justo esto.
+let reconnecting = false;
+async function attemptAutoReconnect(maxAttempts = 5) {
+  if (reconnecting) return; // evita intentos duplicados si el evento salta más de una vez
+  reconnecting = true;
+
+  const token = sessionStorage.getItem('shadow_reconnect_token');
+  if (!token) { reconnecting = false; setNetStatus('offline', 'desconectado'); return; }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    setNetStatus('connecting', `reconectando… (${attempt}/${maxAttempts})`);
+    try {
+      const client = new Client(SERVER_URL);
+      const newRoom = await client.reconnect(token);
+      clearRemoteEntities(); // por si algo quedó a medias antes del corte
+      room = newRoom;
+      mySessionId = room.sessionId;
+      sessionStorage.setItem('shadow_reconnect_token', room.reconnectionToken);
+      attachRoomHandlers(room);
+      room.onLeave((code) => {
+        if (code === 1000) {
+          setNetStatus('offline', 'desconectado');
+          sessionStorage.removeItem('shadow_reconnect_token');
+          return;
+        }
+        attemptAutoReconnect();
+      });
+      setNetStatus('connected', 'conectado');
+      reconnecting = false;
+      return;
+    } catch (err) {
+      console.warn(`[Shadow] Intento de reconexión ${attempt} fallido:`, err.message);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  console.warn('[Shadow] No se pudo recuperar la sesión tras varios intentos.');
+  sessionStorage.removeItem('shadow_reconnect_token');
+  setNetStatus('offline', 'sin servidor');
+  reconnecting = false;
+}
+
 async function connectToServer() {
   setNetStatus('connecting', 'conectando…');
 
@@ -704,111 +862,47 @@ async function connectToServer() {
     return;
   }
 
+  const client = new Client(SERVER_URL);
+  const playerId = getOrCreatePlayerId();
+
+  // Si veníamos de un corte de conexión (o de recargar la página en la misma
+  // pestaña, ya que sessionStorage sobrevive a un refresh) e intentamos
+  // recuperar la MISMA sesión antes de crear una nueva. Esto evita "fantasmas":
+  // jugadores duplicados, o criaturas persiguiendo una posición ya abandonada.
+  const savedToken = sessionStorage.getItem('shadow_reconnect_token');
+  if (savedToken) {
+    try {
+      room = await client.reconnect(savedToken);
+      console.log('[Shadow] Reconectado a la sesión anterior');
+    } catch (err) {
+      console.warn('[Shadow] No se pudo reconectar con el token guardado, uniendo de nuevo:', err.message);
+      sessionStorage.removeItem('shadow_reconnect_token');
+      room = null;
+    }
+  }
+
   try {
-    const client = new Client(SERVER_URL);
-    const playerId = getOrCreatePlayerId();
-    room = await client.joinOrCreate('shadow_room', { name: 'Jugador', playerId });
+    if (!room) {
+      room = await client.joinOrCreate('shadow_room', { name: 'Jugador', playerId });
+    }
     mySessionId = room.sessionId;
+    sessionStorage.setItem('shadow_reconnect_token', room.reconnectionToken);
     setNetStatus('connected', 'conectado');
 
-    const $ = getStateCallbacks(room);
-    $(room.state).players.onAdd((playerState, sessionId) => {
-      if (sessionId === mySessionId) {
-        // Este es mi propio jugador: no dibujamos un duplicado, pero sí nos
-        // suscribimos a mi oro (esperar a onAdd evita leer el estado antes de
-        // que haya llegado del servidor, que puede tardar un instante tras unirse).
-        goldEl.textContent = playerState.gold;
-        $(playerState).onChange(() => { goldEl.textContent = playerState.gold; });
+    attachRoomHandlers(room);
+
+    room.onLeave((code) => {
+      // Código 1000 = cierre normal/voluntario. Cualquier otro código es un
+      // corte inesperado (red móvil, cambio de wifi a datos, backgrounding del
+      // navegador, etc.) — ahí vale la pena intentar recuperar la sesión sola,
+      // sin que el jugador tenga que hacer nada.
+      if (code === 1000) {
+        setNetStatus('offline', 'desconectado');
+        sessionStorage.removeItem('shadow_reconnect_token');
         return;
       }
-      const group = createRemotePlayerMesh();
-      group.position.set(playerState.x, playerState.y, playerState.z);
-      scene.add(group);
-      const entry = { group, targetX: playerState.x, targetZ: playerState.z, targetRotY: playerState.rotationY };
-      remotePlayers.set(sessionId, entry);
-
-      $(playerState).onChange(() => {
-        entry.targetX = playerState.x;
-        entry.targetZ = playerState.z;
-        entry.targetRotY = playerState.rotationY;
-      });
+      attemptAutoReconnect();
     });
-
-    $(room.state).players.onRemove((playerState, sessionId) => {
-      const entry = remotePlayers.get(sessionId);
-      if (entry) {
-        scene.remove(entry.group);
-        remotePlayers.delete(sessionId);
-      }
-    });
-
-    // Criaturas: el servidor decide posición, rotación, vida y estado de IA.
-    // El cliente solo dibuja e interpola — igual que con los jugadores remotos.
-    $(room.state).creatures.onAdd((creatureState, creatureId) => {
-      const group = createCreatureMesh();
-      group.position.set(creatureState.x, creatureState.y, creatureState.z);
-      group.userData.creatureId = creatureId; // para identificarla al hacer raycast de un toque
-      scene.add(group);
-      const entry = {
-        group,
-        targetX: creatureState.x,
-        targetZ: creatureState.z,
-        targetRotY: creatureState.rotationY,
-        aiState: creatureState.aiState,
-        lastHp: creatureState.hp,
-      };
-      creatures.set(creatureId, entry);
-      updateCreatureVisuals(entry, creatureState);
-
-      $(creatureState).onChange(() => {
-        entry.targetX = creatureState.x;
-        entry.targetZ = creatureState.z;
-        entry.targetRotY = creatureState.rotationY;
-        entry.aiState = creatureState.aiState;
-        if (creatureState.hp < entry.lastHp) flashHit(entry); // bajó la vida: acaba de recibir un golpe
-        entry.lastHp = creatureState.hp;
-        updateCreatureVisuals(entry, creatureState);
-      });
-    });
-
-    $(room.state).creatures.onRemove((creatureState, creatureId) => {
-      const entry = creatures.get(creatureId);
-      if (entry) {
-        scene.remove(entry.group);
-        creatures.delete(creatureId);
-      }
-    });
-
-    // Bolsas de loot: aparecen al morir una criatura, desaparecen al vaciarse
-    // (o cuando alguien se lleva el último objeto). El contenido en sí (oro,
-    // futuros items) se lee directamente del estado sincronizado al abrir el panel.
-    $(room.state).lootBags.onAdd((bagState, bagId) => {
-      const group = createLootBagMesh();
-      group.position.set(bagState.x, 0, bagState.z);
-      group.userData.bagId = bagId;
-      scene.add(group);
-      lootBags.set(bagId, { group, state: bagState });
-
-      // Si tenemos el panel de esta bolsa abierto y alguien coge algo (incluido
-      // nosotros mismos), refrescamos la lista para que no se quede desactualizada.
-      $(bagState).items.onAdd(() => { if (openLootBagId === bagId) renderLootPanel(); });
-      $(bagState).items.onRemove(() => { if (openLootBagId === bagId) renderLootPanel(); });
-    });
-
-    $(room.state).lootBags.onRemove((bagState, bagId) => {
-      const entry = lootBags.get(bagId);
-      if (entry) {
-        scene.remove(entry.group);
-        lootBags.delete(bagId);
-      }
-      // Si la bolsa que teníamos abierta en el panel desaparece (se vació), cerramos el panel.
-      if (openLootBagId === bagId) closeLootPanel();
-    });
-
-    // Mi propio oro ya se gestiona dentro de players.onAdd (arriba), donde el
-    // estado está garantizado disponible.
-
-    room.onLeave(() => setNetStatus('offline', 'desconectado'));
 
   } catch (err) {
     console.warn('[Shadow] No se pudo conectar al servidor, jugando en modo local:', err.message);

@@ -24,6 +24,7 @@ const { loadCharacter, saveCharacter } = require('../db/characters');
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
 const SAVE_INTERVAL_MS = 15000; // guardar el progreso de cada jugador cada 15s
+const RECONNECTION_GRACE_SECONDS = 25; // margen para recuperar la MISMA sesión tras un corte breve (red móvil, etc.)
 const MELEE_RANGE = 2.2;     // distancia máxima para golpear (algo más que los 1.3 a los que la criatura se detiene)
 const ATTACK_DAMAGE = 5;     // daño por golpe (un lobo de 20 hp muere en 4 golpes)
 const ATTACK_COOLDOWN = 1.2; // segundos entre golpes automáticos
@@ -49,6 +50,16 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// Transformación isométrica: DEBE ser idéntica a isoForward/isoRight del
+// cliente (index.html). El cliente mueve tu personaje EN PANTALLA usando esta
+// rotación de 45°, pero durante mucho tiempo el servidor aplicaba el
+// input crudo del joystick como si fuera dirección de mundo directa —
+// resultado: tu posición visual y tu posición real (la que cuenta para el
+// aggro de las criaturas) divergían desde el primer paso que dabas. Este es
+// el motivo real por el que "acercarse" a un lobo nunca funcionaba bien.
+const ISO_FORWARD = { x: -Math.SQRT1_2, z: -Math.SQRT1_2 };
+const ISO_RIGHT = { x: Math.SQRT1_2, z: -Math.SQRT1_2 };
 
 class ShadowRoom extends Room {
 
@@ -229,9 +240,14 @@ class ShadowRoom extends Room {
       const nz = input.dz / Math.max(len, 1);
       const speedFactor = Math.min(len, 1);
 
-      player.x += nx * MAX_SPEED * dt * speedFactor;
-      player.z += nz * MAX_SPEED * dt * speedFactor;
-      player.rotationY = Math.atan2(nx, nz);
+      // Mismo cálculo que el cliente: convierte el input crudo del joystick/
+      // teclado en dirección de mundo real, rotada 45° para la cámara isométrica.
+      const moveX = ISO_FORWARD.x * (-nz) + ISO_RIGHT.x * nx;
+      const moveZ = ISO_FORWARD.z * (-nz) + ISO_RIGHT.z * nx;
+
+      player.x += moveX * MAX_SPEED * dt * speedFactor;
+      player.z += moveZ * MAX_SPEED * dt * speedFactor;
+      player.rotationY = Math.atan2(moveX, moveZ);
     }
 
     // --- IA de criaturas ---
@@ -319,6 +335,23 @@ class ShadowRoom extends Room {
   }
 
   async onLeave(client, consented) {
+    // Si el jugador cerró sesión voluntariamente (consented=true), no tiene
+    // sentido esperar a que "vuelva" — limpiamos ya. Pero si la conexión se
+    // cortó de golpe (red móvil, cambio de wifi a datos, etc.), le damos un
+    // margen para recuperar la MISMA sesión antes de darle de baja del todo.
+    // Esto evita "fantasmas": jugadores que las criaturas siguen persiguiendo,
+    // o compañeros que dejan de verse el uno al otro tras un corte breve.
+    if (!consented) {
+      try {
+        await this.allowReconnection(client, RECONNECTION_GRACE_SECONDS);
+        console.log(`[ShadowRoom] ${client.sessionId} se reconectó a tiempo, sigue en la partida`);
+        return; // reconectó: NO limpiamos su estado, sigue siendo el mismo jugador
+      } catch (e) {
+        // No volvió a tiempo: continuamos con la limpieza normal más abajo.
+        console.log(`[ShadowRoom] ${client.sessionId} no se reconectó a tiempo, se da de baja`);
+      }
+    }
+
     const playerId = this.playerIds.get(client.sessionId);
     const player = this.state.players.get(client.sessionId);
     if (playerId && player) {
