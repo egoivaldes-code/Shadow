@@ -2,41 +2,28 @@
  * ShadowRoom — sala de juego mínima
  *
  * Responsabilidad de esta sala (según docs/technical/Arquitectura_Inicial.md):
- *   - Es la AUTORIDAD sobre la posición de cada jugador.
- *   - El cliente ENVÍA una intención de movimiento ("quiero ir en esta dirección").
- *   - El servidor VALIDA (por ahora solo clamp de velocidad) y actualiza el estado.
- *   - Colyseus sincroniza automáticamente ese estado a todos los clientes conectados.
- *
- * Lo que esta sala NO hace todavía (vendrá en fases posteriores):
- *   - No valida colisiones contra árboles/rocas del mundo (eso vive solo en cliente por ahora).
- *   - No persiste nada en base de datos (Supabase vendrá en Fase 3).
- *   - No hay chunks en el servidor todavía — todo el mundo es "una sala" única.
- */
-
-/**
- * ShadowRoom — sala de juego mínima
- *
- * Responsabilidad de esta sala (según docs/technical/Arquitectura_Inicial.md):
  *   - Es la AUTORIDAD sobre la posición de cada jugador y de cada criatura.
  *   - El cliente ENVÍA una intención de movimiento ("quiero ir en esta dirección").
  *   - El servidor VALIDA (por ahora solo clamp de velocidad) y actualiza el estado.
  *   - Colyseus sincroniza automáticamente ese estado a todos los clientes conectados.
  *
- * Fase 3: se añaden criaturas con IA de patrulla/persecución (ver game/CreatureAI.js).
+ * Fase 3: criaturas con IA de aggro (game/CreatureAI.js), combate, loot, y
+ * persistencia de personaje en Supabase (db/characters.js) — se carga al
+ * unirse, se guarda periódicamente y al desconectar.
  *
  * Lo que esta sala NO hace todavía (vendrá en fases posteriores):
  *   - No valida colisiones contra árboles/rocas del mundo (eso vive solo en cliente por ahora).
- *   - No persiste nada en base de datos (Supabase vendrá más adelante).
  *   - No hay chunks en el servidor todavía — todo el mundo es "una sala" única.
- *   - No hay combate del jugador contra la criatura todavía — eso es el siguiente paso de la Fase 3.
  */
 
 const { Room } = require('colyseus');
 const { ShadowRoomState, PlayerState, CreatureState, LootItemState, LootBagState } = require('../schema/ShadowRoomState');
 const { Creature } = require('../game/CreatureAI');
+const { loadCharacter, saveCharacter } = require('../db/characters');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
+const SAVE_INTERVAL_MS = 15000; // guardar el progreso de cada jugador cada 15s
 const MELEE_RANGE = 2.2;     // distancia máxima para golpear (algo más que los 1.3 a los que la criatura se detiene)
 const ATTACK_DAMAGE = 5;     // daño por golpe (un lobo de 20 hp muere en 4 golpes)
 const ATTACK_COOLDOWN = 1.2; // segundos entre golpes automáticos
@@ -84,6 +71,11 @@ class ShadowRoom extends Room {
     // Cooldown de ataque por jugador (segundos restantes hasta poder golpear de nuevo).
     // Vive solo en el servidor, no se sincroniza — el cliente no necesita saberlo.
     this.attackCooldowns = new Map();
+
+    // sessionId (cambia cada conexión) -> playerId (estable entre sesiones,
+    // generado por el navegador y guardado en localStorage). Necesario para
+    // saber a quién pertenece cada guardado en Supabase.
+    this.playerIds = new Map();
 
     // Instancias de Creature (lógica de IA), indexadas igual que this.state.creatures
     this.creatures = new Map();
@@ -134,7 +126,19 @@ class ShadowRoom extends Room {
     // es la autoridad: aplica movimiento según su propio reloj, no el del cliente.
     this.setSimulationInterval(() => this.tick(), TICK_RATE_MS);
 
+    // Guardado periódico del progreso de cada jugador conectado (best-effort:
+    // si el servidor se reinicia entre guardados, se pierde como mucho lo que
+    // pasó en los últimos SAVE_INTERVAL_MS segundos).
+    this.clock.setInterval(() => this.saveAllPlayers(), SAVE_INTERVAL_MS);
+
     console.log('[ShadowRoom] Sala creada:', this.roomId);
+  }
+
+  async saveAllPlayers() {
+    for (const [sessionId, player] of this.state.players) {
+      const playerId = this.playerIds.get(sessionId);
+      if (playerId) await saveCharacter(playerId, player);
+    }
   }
 
   spawnCreatures() {
@@ -284,22 +288,47 @@ class ShadowRoom extends Room {
     }
   }
 
-  onJoin(client, options) {
+  async onJoin(client, options) {
+    // playerId: identificador estable generado por el navegador (localStorage),
+    // distinto del sessionId de Colyseus (que cambia cada conexión). Si el
+    // cliente no manda uno (versión vieja, o Supabase aún sin configurar),
+    // simplemente no habrá persistencia para esta sesión.
+    const playerId = typeof options?.playerId === 'string' ? options.playerId.slice(0, 64) : null;
+    if (playerId) this.playerIds.set(client.sessionId, playerId);
+
     const player = new PlayerState();
     player.name = (options?.name || 'Jugador').slice(0, 20);
-    // Spawn simple: todos entran cerca del origen por ahora.
     player.x = 0;
     player.y = 0;
     player.z = 0;
-    this.state.players.set(client.sessionId, player);
 
+    const saved = playerId ? await loadCharacter(playerId) : null;
+    if (saved) {
+      player.x = saved.x;
+      player.y = saved.y;
+      player.z = saved.z;
+      player.gold = saved.gold;
+      player.hp = saved.hp;
+      player.maxHp = saved.max_hp;
+      if (saved.name) player.name = saved.name;
+      console.log(`[ShadowRoom] Personaje restaurado para ${playerId}: oro=${saved.gold}, pos=(${saved.x.toFixed(1)},${saved.z.toFixed(1)})`);
+    }
+
+    this.state.players.set(client.sessionId, player);
     console.log(`[ShadowRoom] ${client.sessionId} se unió (${this.state.players.size} jugadores)`);
   }
 
-  onLeave(client, consented) {
+  async onLeave(client, consented) {
+    const playerId = this.playerIds.get(client.sessionId);
+    const player = this.state.players.get(client.sessionId);
+    if (playerId && player) {
+      await saveCharacter(playerId, player);
+    }
+
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.attackCooldowns.delete(client.sessionId);
+    this.playerIds.delete(client.sessionId);
     for (const creature of this.creatures.values()) {
       creature.removePlayer(client.sessionId);
     }

@@ -680,6 +680,20 @@ async function wakeUpServer(maxAttempts = 8) {
   return false;
 }
 
+// playerId: identificador estable para este navegador/dispositivo, usado para
+// recuperar el progreso guardado en Supabase entre sesiones. No es un sistema
+// de login real (eso vendrá más adelante) — simplemente evita perder el
+// progreso al recargar la página en el mismo móvil.
+function getOrCreatePlayerId() {
+  const KEY = 'shadow_player_id';
+  let id = localStorage.getItem(KEY);
+  if (!id) {
+    id = 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem(KEY, id);
+  }
+  return id;
+}
+
 async function connectToServer() {
   setNetStatus('connecting', 'conectando…');
 
@@ -692,7 +706,8 @@ async function connectToServer() {
 
   try {
     const client = new Client(SERVER_URL);
-    room = await client.joinOrCreate('shadow_room', { name: 'Jugador' });
+    const playerId = getOrCreatePlayerId();
+    room = await client.joinOrCreate('shadow_room', { name: 'Jugador', playerId });
     mySessionId = room.sessionId;
     setNetStatus('connected', 'conectado');
 

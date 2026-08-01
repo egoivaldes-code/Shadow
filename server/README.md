@@ -68,10 +68,16 @@ Esto se conecta en el siguiente paso del roadmap (unir cliente Fase 1-2 con este
 | Variable | Descripción | Por defecto |
 |----------|-------------|-------------|
 | `PORT` | Puerto donde escucha el servidor | `2567` |
+| `SUPABASE_URL` | URL del proyecto de Supabase (`https://xxxxx.supabase.co`) | — (sin persistencia si falta) |
+| `SUPABASE_SECRET_KEY` | Clave secreta de Supabase (`sb_secret_...`, equivalente a `service_role`) | — (sin persistencia si falta) |
+
+**Importante:** estas dos últimas se configuran en el panel de Render (Environment), nunca en el código ni en el repositorio — son secretas y el repo es público. Si no están configuradas, el servidor sigue funcionando con normalidad, simplemente sin guardar el progreso entre sesiones (se avisa por consola).
+
+Antes de desplegar, aplica la migración SQL en Supabase → SQL Editor: ver `database/001_characters.sql`.
 
 ## Próximos pasos (fuera de esta fase)
 
 - Validar colisiones contra el mundo (árboles/rocas) también en servidor, no solo en cliente
-- Persistir personajes en Supabase
 - Sistema de chunks también en el servidor (filtrar entidades por proximidad)
 - Anti-cheat básico (límites de velocidad más estrictos, validación de posición)
+- Sistema de login/auth real (de momento el progreso se identifica por un id generado en el navegador, guardado en localStorage)
