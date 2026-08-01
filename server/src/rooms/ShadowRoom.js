@@ -32,7 +32,7 @@
  */
 
 const { Room } = require('colyseus');
-const { ShadowRoomState, PlayerState, CreatureState } = require('../schema/ShadowRoomState');
+const { ShadowRoomState, PlayerState, CreatureState, LootItemState, LootBagState } = require('../schema/ShadowRoomState');
 const { Creature } = require('../game/CreatureAI');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
@@ -40,6 +40,9 @@ const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servid
 const MELEE_RANGE = 2.2;     // distancia máxima para golpear (algo más que los 1.3 a los que la criatura se detiene)
 const ATTACK_DAMAGE = 5;     // daño por golpe (un lobo de 20 hp muere en 4 golpes)
 const ATTACK_COOLDOWN = 1.2; // segundos entre golpes automáticos
+const LOOT_EXCLUSIVE_MS = 2 * 60 * 1000; // 2 minutos de derecho exclusivo para quien más daño hizo
+const LOOT_PICKUP_RANGE = 2.5; // hay que estar cerca de la bolsa para poder saquearla
+const GOLD_MIN = 3, GOLD_MAX = 10; // oro que suelta un lobo al morir
 
 // Puntos de spawn de criaturas de referencia, repartidos alrededor del origen
 // (mismo chunk 0,0 que ya genera el cliente). En una fase posterior esto vendrá
@@ -120,6 +123,13 @@ class ShadowRoom extends Room {
       player.targetId = targetId;
     });
 
+    // Saqueo: el cliente pide coger un item concreto de una bolsa. El servidor
+    // valida todo (proximidad, derecho exclusivo) — nunca confía en lo que pida el cliente.
+    this._nextLootBagId = 1;
+    this.onMessage('takeLootItem', (client, message) => {
+      this.handleTakeLootItem(client, message);
+    });
+
     // Bucle de simulación del servidor — aquí es donde el servidor
     // es la autoridad: aplica movimiento según su propio reloj, no el del cliente.
     this.setSimulationInterval(() => this.tick(), TICK_RATE_MS);
@@ -142,6 +152,62 @@ class ShadowRoom extends Room {
     });
 
     console.log(`[ShadowRoom] ${this.creatures.size} criaturas generadas`);
+  }
+
+  // Crea una bolsa de loot en la posición de una criatura recién muerta.
+  // Dueño exclusivo: quien más amenaza (daño) acumuló, durante LOOT_EXCLUSIVE_MS.
+  createLootBag(creature) {
+    const bagId = `loot_${this._nextLootBagId++}`;
+    const bag = new LootBagState();
+    bag.x = creature.state.x;
+    bag.z = creature.state.z;
+    bag.ownerSessionId = creature.lastKillerSessionId || '';
+    bag.exclusiveUntil = Date.now() + LOOT_EXCLUSIVE_MS;
+
+    const goldAmount = GOLD_MIN + Math.floor(Math.random() * (GOLD_MAX - GOLD_MIN + 1));
+    const goldItem = new LootItemState();
+    goldItem.itemId = `${bagId}_gold`;
+    goldItem.kind = 'gold';
+    goldItem.amount = goldAmount;
+    bag.items.set(goldItem.itemId, goldItem);
+
+    this.state.lootBags.set(bagId, bag);
+    console.log(`[Loot] Bolsa ${bagId} creada en (${bag.x.toFixed(1)},${bag.z.toFixed(1)}) — dueño: ${bag.ownerSessionId || 'nadie'}, oro=${goldAmount}`);
+  }
+
+  handleTakeLootItem(client, message) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+
+    const bagId = message?.bagId;
+    const itemId = message?.itemId;
+    const bag = this.state.lootBags.get(bagId);
+    if (!bag) return; // la bolsa ya no existe (alguien se la llevó entera, o nunca existió)
+
+    // Derecho exclusivo: solo el dueño puede saquear mientras no haya pasado el tiempo
+    const now = Date.now();
+    if (now < bag.exclusiveUntil && bag.ownerSessionId && bag.ownerSessionId !== sessionId) {
+      return; // no es tu bolsa todavía, ignorar en silencio
+    }
+
+    // Proximidad: hay que estar físicamente cerca para saquear
+    const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
+    if (dist > LOOT_PICKUP_RANGE) return;
+
+    const item = bag.items.get(itemId);
+    if (!item) return;
+
+    if (item.kind === 'gold') {
+      player.gold += item.amount;
+    }
+    // (futuros tipos de item: añadir al inventario del jugador aquí)
+
+    bag.items.delete(itemId);
+    if (bag.items.size === 0) {
+      this.state.lootBags.delete(bagId);
+      console.log(`[Loot] Bolsa ${bagId} vaciada y eliminada`);
+    }
   }
 
   tick() {
@@ -198,6 +264,10 @@ class ShadowRoom extends Room {
 
       creature.takeDamage(ATTACK_DAMAGE, sessionId);
       this.attackCooldowns.set(sessionId, ATTACK_COOLDOWN);
+
+      if (creature.state.aiState === 'dead') {
+        this.createLootBag(creature);
+      }
     }
 
     // Diagnóstico periódico (cada ~5s, no en cada tick): útil para confirmar en los

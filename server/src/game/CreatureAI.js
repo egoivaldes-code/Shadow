@@ -261,11 +261,29 @@ class Creature {
     this.state.rotationY = Math.atan2(nx, nz);
   }
 
+  // Devuelve el sessionId con más amenaza acumulada en la tabla (quien más daño
+  // ha hecho), o null si la tabla está vacía. Usado para asignar el dueño del loot.
+  getHighestThreatSessionId() {
+    let bestSessionId = null;
+    let bestThreat = -Infinity;
+    for (const [sessionId, threat] of this.aggroTable) {
+      if (threat > bestThreat) {
+        bestThreat = threat;
+        bestSessionId = sessionId;
+      }
+    }
+    return bestSessionId;
+  }
+
   takeDamage(amount, attackerSessionId) {
     if (this.state.aiState === 'dead') return;
     this.state.hp = Math.max(0, this.state.hp - amount);
     if (attackerSessionId) this.addThreat(attackerSessionId, amount);
     if (this.state.hp === 0) {
+      // Capturamos quién tiene más amenaza ANTES de vaciar la tabla, para saber
+      // a quién pertenece el derecho exclusivo de loot (ShadowRoom lee esto justo
+      // después de que takeDamage provoque la muerte).
+      this.lastKillerSessionId = this.getHighestThreatSessionId() || attackerSessionId || null;
       this.state.aiState = 'dead';
       this.aggroTable.clear();
       this.deadTimer = 0;

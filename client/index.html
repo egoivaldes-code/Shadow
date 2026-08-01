@@ -58,6 +58,65 @@
   #netstatus.connecting { color: #e0c97f; }
   #netstatus.offline { color: #e07f7f; }
 
+  #loot-panel {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(20, 16, 12, 0.95);
+    border: 2px solid rgba(200, 160, 60, 0.6);
+    border-radius: 12px;
+    padding: 16px;
+    min-width: 220px;
+    z-index: 30;
+    display: none;
+    color: #e8e6df;
+  }
+  #loot-panel.visible { display: block; }
+  #loot-panel h3 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #d4af5a;
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  #loot-panel .loot-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255,255,255,0.06);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  #loot-panel .loot-item button {
+    background: rgba(212, 175, 90, 0.85);
+    border: none;
+    border-radius: 5px;
+    color: #1a1408;
+    font-weight: 700;
+    padding: 5px 12px;
+    font-size: 12px;
+  }
+  #loot-panel .loot-empty {
+    text-align: center;
+    font-size: 12px;
+    color: rgba(255,255,255,0.5);
+    padding: 8px 0;
+  }
+  #loot-panel .loot-close {
+    display: block;
+    margin: 10px auto 0;
+    background: none;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.6);
+    border-radius: 6px;
+    padding: 5px 16px;
+    font-size: 12px;
+  }
+
   #combat-warning {
     position: fixed;
     top: 70px;
@@ -163,7 +222,13 @@
 
 <div id="hud">
   <div id="title">Shadow <span>· prototipo</span></div>
-  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span><br>IA: <span id="aidebug">--</span></div>
+  <div id="stats">FPS: <span id="fps">--</span><br>Chunk: <span id="chunkinfo">0,0</span><br>Red: <span id="netstatus">desconectado</span><br>IA: <span id="aidebug">--</span><br>Oro: <span id="gold">0</span></div>
+</div>
+
+<div id="loot-panel">
+  <h3>Bolsa de botín</h3>
+  <div id="loot-items"></div>
+  <button class="loot-close" id="loot-close-btn">Cerrar</button>
 </div>
 
 <div id="combat-warning">⚔ ¡Un enemigo te ataca!</div>
@@ -505,6 +570,29 @@ function createRemotePlayerMesh() {
 const creatureBodyMat = new THREE.MeshStandardMaterial({ color: 0x9c5a4a, roughness: 0.8 });
 const creatureAlertMat = new THREE.MeshStandardMaterial({ color: 0xe0524a, roughness: 0.6, emissive: 0x3a0f0a, emissiveIntensity: 0.4 });
 
+// Bolsa de loot: un saquito simple en el suelo, con un ligero balanceo para
+// que se note como "objeto interactuable" sin necesitar un modelo GLB todavía.
+const lootBagMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2e, roughness: 0.9 });
+function createLootBagMesh() {
+  const group = new THREE.Group();
+  const sack = new THREE.Mesh(new THREE.SphereGeometry(0.32, 8, 6), lootBagMat);
+  sack.scale.set(1, 0.75, 1);
+  sack.position.y = 0.28;
+  sack.castShadow = true;
+  group.add(sack);
+
+  const tie = new THREE.Mesh(
+    new THREE.TorusGeometry(0.1, 0.03, 6, 10),
+    new THREE.MeshStandardMaterial({ color: 0x4a3320 })
+  );
+  tie.rotation.x = Math.PI / 2;
+  tie.position.y = 0.5;
+  group.add(tie);
+
+  group.userData.sack = sack;
+  return group;
+}
+
 function createCreatureMesh() {
   const group = new THREE.Group();
 
@@ -563,6 +651,8 @@ const ISO_BILLBOARD_ANGLE = Math.PI / 4; // ángulo fijo de la cámara isométri
 
 const remotePlayers = new Map(); // sessionId -> { group, targetX, targetZ, targetRotY }
 const creatures = new Map();     // creatureId -> { group, targetX, targetZ, targetRotY, aiState }
+const lootBags = new Map();      // bagId -> { group, state }
+let openLootBagId = null;        // bolsa actualmente mostrada en el panel, si hay alguna
 let room = null;
 let mySessionId = null;
 
@@ -608,7 +698,14 @@ async function connectToServer() {
 
     const $ = getStateCallbacks(room);
     $(room.state).players.onAdd((playerState, sessionId) => {
-      if (sessionId === mySessionId) return; // no dibujar un duplicado de mí mismo
+      if (sessionId === mySessionId) {
+        // Este es mi propio jugador: no dibujamos un duplicado, pero sí nos
+        // suscribimos a mi oro (esperar a onAdd evita leer el estado antes de
+        // que haya llegado del servidor, que puede tardar un instante tras unirse).
+        goldEl.textContent = playerState.gold;
+        $(playerState).onChange(() => { goldEl.textContent = playerState.gold; });
+        return;
+      }
       const group = createRemotePlayerMesh();
       group.position.set(playerState.x, playerState.y, playerState.z);
       scene.add(group);
@@ -666,6 +763,35 @@ async function connectToServer() {
         creatures.delete(creatureId);
       }
     });
+
+    // Bolsas de loot: aparecen al morir una criatura, desaparecen al vaciarse
+    // (o cuando alguien se lleva el último objeto). El contenido en sí (oro,
+    // futuros items) se lee directamente del estado sincronizado al abrir el panel.
+    $(room.state).lootBags.onAdd((bagState, bagId) => {
+      const group = createLootBagMesh();
+      group.position.set(bagState.x, 0, bagState.z);
+      group.userData.bagId = bagId;
+      scene.add(group);
+      lootBags.set(bagId, { group, state: bagState });
+
+      // Si tenemos el panel de esta bolsa abierto y alguien coge algo (incluido
+      // nosotros mismos), refrescamos la lista para que no se quede desactualizada.
+      $(bagState).items.onAdd(() => { if (openLootBagId === bagId) renderLootPanel(); });
+      $(bagState).items.onRemove(() => { if (openLootBagId === bagId) renderLootPanel(); });
+    });
+
+    $(room.state).lootBags.onRemove((bagState, bagId) => {
+      const entry = lootBags.get(bagId);
+      if (entry) {
+        scene.remove(entry.group);
+        lootBags.delete(bagId);
+      }
+      // Si la bolsa que teníamos abierta en el panel desaparece (se vació), cerramos el panel.
+      if (openLootBagId === bagId) closeLootPanel();
+    });
+
+    // Mi propio oro ya se gestiona dentro de players.onAdd (arriba), donde el
+    // estado está garantizado disponible.
 
     room.onLeave(() => setNetStatus('offline', 'desconectado'));
 
@@ -812,13 +938,27 @@ function setWarMode(active) {
 warModeBtn.addEventListener('click', () => setWarMode(!warModeActive));
 
 function handleTapForTargeting(clientX, clientY) {
-  if (!warModeActive || !room) return;
+  if (!room) return;
 
   const ndc = new THREE.Vector2(
     (clientX / window.innerWidth) * 2 - 1,
     -(clientY / window.innerHeight) * 2 + 1
   );
   raycaster.setFromCamera(ndc, camera);
+
+  // Primero comprobamos bolsas de loot — se pueden abrir siempre, sin necesidad
+  // de estar en modo guerra (recoger botín es una acción aparte del combate).
+  const bagSacks = [];
+  for (const entry of lootBags.values()) bagSacks.push(entry.group.userData.sack);
+  const bagHits = raycaster.intersectObjects(bagSacks, false);
+  if (bagHits.length > 0) {
+    const bagId = bagHits[0].object.parent.userData.bagId;
+    openLootPanel(bagId);
+    return;
+  }
+
+  // Si no tocamos una bolsa, y estamos en modo guerra, comprobamos criaturas para targeting.
+  if (!warModeActive) return;
 
   const creatureBodies = [];
   for (const entry of creatures.values()) {
@@ -835,6 +975,48 @@ function handleTapForTargeting(clientX, clientY) {
 
   currentTargetId = creatureId;
   room.send('setTarget', { targetId: creatureId });
+}
+
+// ---------- Panel de saqueo ----------
+const lootPanelEl = document.getElementById('loot-panel');
+const lootItemsEl = document.getElementById('loot-items');
+document.getElementById('loot-close-btn').addEventListener('click', closeLootPanel);
+
+function openLootPanel(bagId) {
+  openLootBagId = bagId;
+  renderLootPanel();
+  lootPanelEl.classList.add('visible');
+}
+
+function closeLootPanel() {
+  openLootBagId = null;
+  lootPanelEl.classList.remove('visible');
+}
+
+// Se re-renderiza cada vez que cambia el estado de la bolsa abierta (alguien
+// coge algo, incluido nosotros mismos), para que el panel refleje lo real.
+function renderLootPanel() {
+  if (!openLootBagId) return;
+  const entry = lootBags.get(openLootBagId);
+  if (!entry) { closeLootPanel(); return; }
+
+  const items = [...entry.state.items.entries()];
+  if (items.length === 0) {
+    lootItemsEl.innerHTML = '<div class="loot-empty">La bolsa está vacía</div>';
+    return;
+  }
+
+  lootItemsEl.innerHTML = '';
+  for (const [itemId, item] of items) {
+    const row = document.createElement('div');
+    row.className = 'loot-item';
+    const label = item.kind === 'gold' ? `🪙 ${item.amount} de oro` : `${item.kind} x${item.amount}`;
+    row.innerHTML = `<span>${label}</span><button>Coger</button>`;
+    row.querySelector('button').addEventListener('click', () => {
+      room.send('takeLootItem', { bagId: openLootBagId, itemId });
+    });
+    lootItemsEl.appendChild(row);
+  }
 }
 
 // Escuchamos toques en el propio canvas (no en la zona del joystick, que ya
@@ -858,6 +1040,7 @@ const fpsEl = document.getElementById('fps');
 const chunkEl = document.getElementById('chunkinfo');
 const aiDebugEl = document.getElementById('aidebug');
 const combatWarningEl = document.getElementById('combat-warning');
+const goldEl = document.getElementById('gold');
 const COMBAT_WARNING_RADIUS = 5; // si una criatura en combate está a menos de esto de MI jugador, avisar
 
 function resolveCollisions(pos, obstacles) {
@@ -941,6 +1124,13 @@ function animate() {
 
     // Anillo de objetivo: visible solo en la criatura que tengo marcada
     entry.group.userData.targetRing.visible = (entry.group.userData.creatureId === currentTargetId);
+  }
+
+  // Bolsas de loot: no se mueven (el servidor no las reposiciona), pero un
+  // pequeño balanceo ayuda a que se noten como "objeto interactuable" en el suelo.
+  for (const entry of lootBags.values()) {
+    entry.group.userData.sack.position.y = 0.28 + Math.sin(performance.now() * 0.002) * 0.03;
+    entry.group.rotation.y += dt * 0.4;
   }
 
   // Cargar/descargar chunks según posición del jugador

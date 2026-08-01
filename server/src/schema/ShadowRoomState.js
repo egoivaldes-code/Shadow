@@ -23,6 +23,7 @@ class PlayerState extends Schema {
     this.maxHp = 30;
     this.warMode = false;
     this.targetId = ''; // id de la criatura objetivo, vacío si no hay
+    this.gold = 0;
   }
 }
 defineTypes(PlayerState, {
@@ -35,6 +36,42 @@ defineTypes(PlayerState, {
   maxHp: 'number',
   warMode: 'boolean',
   targetId: 'string',
+  gold: 'number',
+});
+
+// Un objeto individual dentro de una bolsa de loot. De momento solo existe
+// el tipo "gold"; está preparado para añadir tipos de item/material después
+// (sección 16 del GDD) sin tener que rehacer el esquema.
+class LootItemState extends Schema {
+  constructor() {
+    super();
+    this.itemId = '';   // id único dentro de la bolsa, para poder coger uno concreto
+    this.kind = 'gold'; // 'gold' | (futuro: 'item', 'material', ...)
+    this.amount = 0;
+  }
+}
+defineTypes(LootItemState, {
+  itemId: 'string',
+  kind: 'string',
+  amount: 'number',
+});
+
+class LootBagState extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.z = 0;
+    this.ownerSessionId = '';   // quién tiene derecho exclusivo mientras dure el temporizador
+    this.exclusiveUntil = 0;    // Date.now() (ms) hasta el que el loot es exclusivo del owner
+    this.items = new MapSchema();
+  }
+}
+defineTypes(LootBagState, {
+  x: 'number',
+  z: 'number',
+  ownerSessionId: 'string',
+  exclusiveUntil: 'number',
+  items: { map: LootItemState },
 });
 
 class CreatureState extends Schema {
@@ -66,11 +103,13 @@ class ShadowRoomState extends Schema {
     super();
     this.players = new MapSchema();
     this.creatures = new MapSchema();
+    this.lootBags = new MapSchema();
   }
 }
 defineTypes(ShadowRoomState, {
   players: { map: PlayerState },
   creatures: { map: CreatureState },
+  lootBags: { map: LootBagState },
 });
 
-module.exports = { PlayerState, CreatureState, ShadowRoomState };
+module.exports = { PlayerState, CreatureState, LootItemState, LootBagState, ShadowRoomState };
