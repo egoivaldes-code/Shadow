@@ -12,6 +12,8 @@ const MAX_INVENTORY_SLOTS = 20; // límite de TIPOS distintos de objeto, no de c
 const ITEMS = {
   wolf_pelt: { name: 'Piel de lobo', rarity: 'common' },
   wolf_fang: { name: 'Colmillo de lobo', rarity: 'rare' },
+  wood: { name: 'Madera', rarity: 'common' },
+  axe: { name: 'Hacha', rarity: 'common' },
 };
 
 // Tabla de drops por tipo de criatura. Cada entrada tiene una probabilidad

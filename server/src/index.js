@@ -15,7 +15,15 @@ const express = require('express');
 const cors = require('cors');
 const { Server } = require('colyseus');
 const { WebSocketTransport } = require('@colyseus/ws-transport');
+const { Encoder } = require('@colyseus/schema');
 const { ShadowRoom } = require('./rooms/ShadowRoom');
+
+// El estado sincronizado ahora incluye potencialmente cientos de árboles
+// (40 por chunk, varios chunks explorados a la vez), y el buffer por defecto
+// de @colyseus/schema (16 KB) se queda corto y trunca el estado en silencio.
+// Lo ampliamos a un margen amplio para que crecer el mundo explorado no rompa
+// la sincronización.
+Encoder.BUFFER_SIZE = 256 * 1024; // 256 KB
 
 const PORT = process.env.PORT || 2567;
 

@@ -126,18 +126,40 @@ defineTypes(CreatureState, {
   kind: 'string',
 });
 
+// Un nodo de recolección (árbol talable, roca de mina, etc.) — a diferencia
+// de los árboles decorativos del cliente (generados por semilla, puramente
+// visuales), estos SÍ viven en el servidor: tienen estado real (agotado o no)
+// y dan un recurso de verdad al recolectarlos.
+class ResourceNodeState extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.z = 0;
+    this.kind = 'tree'; // 'tree' | (futuro: 'ore_vein', 'fishing_spot', ...)
+    this.depleted = false;
+  }
+}
+defineTypes(ResourceNodeState, {
+  x: 'number',
+  z: 'number',
+  kind: 'string',
+  depleted: 'boolean',
+});
+
 class ShadowRoomState extends Schema {
   constructor() {
     super();
     this.players = new MapSchema();
     this.creatures = new MapSchema();
     this.lootBags = new MapSchema();
+    this.resourceNodes = new MapSchema();
   }
 }
 defineTypes(ShadowRoomState, {
   players: { map: PlayerState },
   creatures: { map: CreatureState },
   lootBags: { map: LootBagState },
+  resourceNodes: { map: ResourceNodeState },
 });
 
-module.exports = { PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState, ShadowRoomState };
+module.exports = { PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState, ResourceNodeState, ShadowRoomState };

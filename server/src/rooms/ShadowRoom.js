@@ -17,17 +17,19 @@
  */
 
 const { Room } = require('colyseus');
-const { ShadowRoomState, PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState } = require('../schema/ShadowRoomState');
+const { ShadowRoomState, PlayerState, InventorySlotState, CreatureState, LootItemState, LootBagState, ResourceNodeState } = require('../schema/ShadowRoomState');
 const { Creature } = require('../game/CreatureAI');
 const { loadCharacter, saveCharacter } = require('../db/characters');
 const { MAX_INVENTORY_SLOTS, rollDrops, getItemDefinition } = require('../game/items');
+const { getTreesForChunk, CHUNK_SIZE } = require('../game/worldGen');
 
 const MAX_SPEED = 3.5;       // debe coincidir con PLAYER_SPEED del cliente (index.html)
 const TICK_RATE_MS = 50;     // 20 actualizaciones/seg de simulación del servidor
 const SAVE_INTERVAL_MS = 15000; // guardar el progreso de cada jugador cada 15s
 const RECONNECTION_GRACE_SECONDS = 25; // margen para recuperar la MISMA sesión tras un corte breve (red móvil, etc.)
 const MELEE_RANGE = 2.2;     // distancia máxima para golpear (algo más que los 1.3 a los que la criatura se detiene)
-const ATTACK_DAMAGE = 5;     // daño por golpe (un lobo de 20 hp muere en 4 golpes)
+const ATTACK_DAMAGE = 5;     // daño por golpe a mano (un lobo de 20 hp muere en 4 golpes)
+const ATTACK_DAMAGE_WITH_AXE = 8; // el hacha también es arma: más daño que a mano limpia
 const ATTACK_COOLDOWN = 1.2; // segundos entre golpes automáticos
 const LOOT_EXCLUSIVE_MS = 2 * 60 * 1000; // 2 minutos de derecho exclusivo para quien más daño hizo
 const LOOT_PICKUP_RANGE = 2.5; // hay que estar cerca de la bolsa para poder saquearla
@@ -42,6 +44,21 @@ const CREATURE_SPAWNS = [
   { x: 10, z: -20, kind: 'wolf' },
   { x: -12, z: -15, kind: 'wolf' },
 ];
+
+// Árboles talables — a diferencia de la versión anterior (6 puntos fijos),
+// ahora CUALQUIER árbol decorativo que el cliente dibuje es un árbol real:
+// el servidor genera, chunk a chunk y sobre la marcha según los jugadores se
+// mueven, la MISMA lista de árboles que el cliente (ver game/worldGen.js —
+// debe coincidir al 100% con la generación de Chunk en client/index.html).
+// Solo se generan los chunks que alguien haya visitado — no existe de golpe
+// "todo el árbol del mundo infinito", igual que el cliente solo carga los
+// chunks cercanos a cada jugador.
+const CHUNK_LOAD_RADIUS = 1; // debe coincidir con LOAD_RADIUS del cliente (rejilla 3x3)
+
+const GATHER_RANGE = 2.5;        // distancia máxima para poder talar
+const GATHER_COOLDOWN = 2;       // segundos que tarda cada "hachazo"
+const WOOD_MIN = 1, WOOD_MAX = 3; // madera obtenida por hachazo
+const TREE_RESPAWN_MS = 45 * 1000; // tiempo hasta que un árbol talado vuelve a estar disponible
 
 function mulberry32(seed) {
   return function () {
@@ -93,6 +110,13 @@ class ShadowRoom extends Room {
     this.creatures = new Map();
     this.spawnCreatures();
 
+    // Cooldown de recolección por jugador (segundos restantes hasta el próximo
+    // hachazo válido). Igual que attackCooldowns, vive solo en el servidor.
+    this.gatherCooldowns = new Map();
+    // Generamos ya los árboles de la zona de spawn, para que existan desde
+    // el primer instante aunque nadie se haya movido todavía.
+    this.ensureChunksAroundPlayer(0, 0);
+
     this.onMessage('move', (client, message) => {
       // message esperado: { dx: number, dz: number } normalizado entre -1 y 1
       const dx = clamp(Number(message?.dx) || 0, -1, 1);
@@ -134,6 +158,12 @@ class ShadowRoom extends Room {
       this.handleTakeLootItem(client, message);
     });
 
+    // Recolección: el cliente pide talar un árbol concreto. El servidor valida
+    // proximidad, que no esté ya agotado, y el cooldown de "hachazo".
+    this.onMessage('gatherNode', (client, message) => {
+      this.handleGatherNode(client, message);
+    });
+
     // Bucle de simulación del servidor — aquí es donde el servidor
     // es la autoridad: aplica movimiento según su propio reloj, no el del cliente.
     this.setSimulationInterval(() => this.tick(), TICK_RATE_MS);
@@ -168,6 +198,100 @@ class ShadowRoom extends Room {
     });
 
     console.log(`[ShadowRoom] ${this.creatures.size} criaturas generadas`);
+  }
+
+  // Genera (si no existían ya) los árboles reales de un chunk concreto,
+  // usando la MISMA fórmula determinista que el cliente. Se llama sobre la
+  // marcha, según los jugadores se acercan a chunks nuevos — nunca genera
+  // "todo el mundo de golpe".
+  ensureChunkGenerated(cx, cz) {
+    const chunkKey = `${cx},${cz}`;
+    if (!this.generatedChunks) this.generatedChunks = new Set();
+    if (this.generatedChunks.has(chunkKey)) return;
+    this.generatedChunks.add(chunkKey);
+
+    const trees = getTreesForChunk(cx, cz);
+    for (const tree of trees) {
+      const id = `tree_${cx}_${cz}_${tree.index}`;
+      const node = new ResourceNodeState();
+      node.x = tree.x;
+      node.z = tree.z;
+      node.kind = 'tree';
+      this.state.resourceNodes.set(id, node);
+    }
+    console.log(`[Mundo] Chunk (${cx},${cz}) generado: ${trees.length} árboles reales`);
+  }
+
+  // Asegura que el chunk donde está el jugador Y sus vecinos (misma rejilla
+  // 3x3 que usa el cliente) tengan sus árboles ya generados en el servidor.
+  ensureChunksAroundPlayer(x, z) {
+    const pcx = Math.floor((x + CHUNK_SIZE / 2) / CHUNK_SIZE);
+    const pcz = Math.floor((z + CHUNK_SIZE / 2) / CHUNK_SIZE);
+    for (let dx = -CHUNK_LOAD_RADIUS; dx <= CHUNK_LOAD_RADIUS; dx++) {
+      for (let dz = -CHUNK_LOAD_RADIUS; dz <= CHUNK_LOAD_RADIUS; dz++) {
+        this.ensureChunkGenerated(pcx + dx, pcz + dz);
+      }
+    }
+  }
+
+  handleGatherNode(client, message) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    if (!player.inventory.has('axe')) {
+      client.send('needAxe', {});
+      return;
+    }
+
+    const nodeId = message?.nodeId;
+    const node = this.state.resourceNodes.get(nodeId);
+    if (!node) return;
+    if (node.depleted) return; // ya lo taló alguien, espera a que respawnee
+
+    if (this.gatherCooldowns.has(sessionId)) return; // todavía recargando el "hachazo"
+
+    const dist = Math.hypot(player.x - node.x, player.z - node.z);
+    if (dist > GATHER_RANGE) return;
+
+    this.gatherCooldowns.set(sessionId, GATHER_COOLDOWN);
+
+    // Por ahora solo hay un tipo de nodo (árbol -> madera). Cuando añadamos
+    // minería/pesca, esto se ramificará según node.kind.
+    if (node.kind === 'tree') {
+      const amount = WOOD_MIN + Math.floor(Math.random() * (WOOD_MAX - WOOD_MIN + 1));
+      this.giveItemToPlayer(client, player, 'wood', amount);
+
+      node.depleted = true;
+      this.clock.setTimeout(() => {
+        node.depleted = false;
+      }, TREE_RESPAWN_MS);
+
+      console.log(`[Recolección] ${sessionId} taló ${nodeId}, +${amount} madera`);
+    }
+  }
+
+  // Añade un objeto directo al inventario (sin pasar por una bolsa de loot),
+  // respetando el mismo límite de MAX_INVENTORY_SLOTS que el saqueo de criaturas.
+  // Devuelve true si se añadió, false si el inventario estaba lleno (y ya
+  // se avisó al cliente) — el llamador decide qué hacer en ese caso.
+  giveItemToPlayer(client, player, itemType, amount) {
+    const existing = player.inventory.get(itemType);
+    if (existing) {
+      existing.quantity += amount;
+      return true;
+    }
+    const def = getItemDefinition(itemType);
+    if (player.inventory.size >= MAX_INVENTORY_SLOTS) {
+      client.send('inventoryFull', { itemName: def.name });
+      return false;
+    }
+    const slot = new InventorySlotState();
+    slot.itemType = itemType;
+    slot.name = def.name;
+    slot.rarity = def.rarity;
+    slot.quantity = amount;
+    player.inventory.set(itemType, slot);
+    return true;
   }
 
   // Crea una bolsa de loot en la posición de una criatura recién muerta.
@@ -231,23 +355,8 @@ class ShadowRoom extends Room {
     if (item.kind === 'gold') {
       player.gold += item.amount;
     } else if (item.kind === 'item') {
-      const existing = player.inventory.get(item.itemType);
-      if (existing) {
-        // Ya tienes ese tipo de objeto: se apila, no ocupa slot nuevo.
-        existing.quantity += item.amount;
-      } else if (player.inventory.size < MAX_INVENTORY_SLOTS) {
-        const slot = new InventorySlotState();
-        slot.itemType = item.itemType;
-        slot.name = item.name;
-        slot.rarity = item.rarity;
-        slot.quantity = item.amount;
-        player.inventory.set(item.itemType, slot);
-      } else {
-        // Inventario lleno (20 tipos distintos): avisamos al cliente y no
-        // quitamos el objeto de la bolsa, para que pueda volver a por él luego.
-        client.send('inventoryFull', { itemName: item.name });
-        return;
-      }
+      const added = this.giveItemToPlayer(client, player, item.itemType, item.amount);
+      if (!added) return; // inventario lleno: no quitamos el objeto de la bolsa, puede volver luego
     }
 
     bag.items.delete(itemId);
@@ -292,6 +401,17 @@ class ShadowRoom extends Room {
       creature.update(dt, playerList);
     }
 
+    // Generar árboles de los chunks nuevos según los jugadores se mueven.
+    // No hace falta comprobarlo cada tick (los chunks son de 128m, nadie los
+    // cruza en 50ms) — cada ~2s es de sobra para que nunca se note el retraso.
+    this._chunkCheckTimer = (this._chunkCheckTimer || 0) + dt;
+    if (this._chunkCheckTimer >= 2) {
+      this._chunkCheckTimer = 0;
+      for (const p of playerList) {
+        this.ensureChunksAroundPlayer(p.x, p.z);
+      }
+    }
+
     // --- Combate: ataque automático en modo guerra ---
     // Reglas validadas por el servidor (nunca se confía en lo que "dice" el cliente):
     // el jugador debe tener warMode activo, un targetId que apunte a una criatura
@@ -314,7 +434,10 @@ class ShadowRoom extends Room {
       const dist = Math.hypot(player.x - creature.state.x, player.z - creature.state.z);
       if (dist > MELEE_RANGE) continue; // fuera de alcance, no golpea todavía
 
-      creature.takeDamage(ATTACK_DAMAGE, sessionId);
+      // El hacha no es solo herramienta de tala: también sirve como arma
+      // (daño extra respecto a ir con las manos vacías).
+      const damage = player.inventory.has('axe') ? ATTACK_DAMAGE_WITH_AXE : ATTACK_DAMAGE;
+      creature.takeDamage(damage, sessionId);
       this.attackCooldowns.set(sessionId, ATTACK_COOLDOWN);
 
       if (creature.state.aiState === 'dead') {
@@ -372,6 +495,17 @@ class ShadowRoom extends Room {
       }
 
       console.log(`[ShadowRoom] Personaje restaurado para ${playerId}: oro=${saved.gold}, objetos=${(saved.inventory || []).length}, pos=(${saved.x.toFixed(1)},${saved.z.toFixed(1)})`);
+    } else {
+      // Personaje nuevo: le damos un hacha inicial. Todavía no hay tienda
+      // donde comprarlas — esto es un arranque temporal hasta que exista un
+      // NPC vendedor o una forma de fabricarlas.
+      const def = getItemDefinition('axe');
+      const axeSlot = new InventorySlotState();
+      axeSlot.itemType = 'axe';
+      axeSlot.name = def.name;
+      axeSlot.rarity = def.rarity;
+      axeSlot.quantity = 1;
+      player.inventory.set('axe', axeSlot);
     }
 
     this.state.players.set(client.sessionId, player);

@@ -449,7 +449,10 @@ class Chunk {
       const z = (rng() - 0.5) * (CHUNK_SIZE - 10);
       // Reservamos el centro del chunk (0,0) como zona de spawn despejada
       if (cx === 0 && cz === 0 && Math.hypot(x, z) < 6) continue;
-      treePositions.push({ x, z, scale: 0.8 + rng() * 0.6, rot: rng() * Math.PI * 2 });
+      // Guardamos el índice de bucle `i` (no la posición final en el array):
+      // el servidor identifica cada árbol como `tree_{cx}_{cz}_{i}` usando este
+      // mismo índice (ver worldGen.js del servidor) — deben coincidir exactamente.
+      treePositions.push({ i, x, z, scale: 0.8 + rng() * 0.6, rot: rng() * Math.PI * 2 });
     }
     for (let i = 0; i < 22; i++) {
       const x = (rng() - 0.5) * (CHUNK_SIZE - 10);
@@ -464,22 +467,42 @@ class Chunk {
       trunkMesh.castShadow = true;
       leafMesh.castShadow = true;
 
-      treePositions.forEach((t, i) => {
+      // nodeId -> { instanceIndex, matrix } — necesario para poder ocultar/mostrar
+      // UN árbol concreto dentro del InstancedMesh compartido del chunk cuando el
+      // servidor avisa de que se ha talado (o ha vuelto a crecer).
+      this.treeByNodeId = new Map();
+      // Y el mapeo inverso (índice de instancia -> nodeId), necesario para
+      // saber qué árbol tocaste al hacer raycast contra el InstancedMesh.
+      this.nodeIdByInstanceIndex = [];
+
+      treePositions.forEach((t, arrayIndex) => {
+        const nodeId = `tree_${cx}_${cz}_${t.i}`;
+
         dummy.position.set(t.x, 0.8 * t.scale, t.z);
         dummy.rotation.set(0, t.rot, 0);
         dummy.scale.setScalar(t.scale);
         dummy.updateMatrix();
-        trunkMesh.setMatrixAt(i, dummy.matrix);
+        trunkMesh.setMatrixAt(arrayIndex, dummy.matrix);
+        const trunkMatrix = dummy.matrix.clone(); // guardamos la matriz "visible" para poder restaurarla tras un respawn
 
         dummy.position.set(t.x, 2.1 * t.scale, t.z);
         dummy.updateMatrix();
-        leafMesh.setMatrixAt(i, dummy.matrix);
+        leafMesh.setMatrixAt(arrayIndex, dummy.matrix);
+        const leafMatrix = dummy.matrix.clone();
 
-        this.obstacles.push({ x: originX + t.x, z: originZ + t.z, r: 0.5 * t.scale });
+        this.treeByNodeId.set(nodeId, { instanceIndex: arrayIndex, trunkMatrix, leafMatrix });
+        this.nodeIdByInstanceIndex[arrayIndex] = nodeId;
+        this.obstacles.push({ x: originX + t.x, z: originZ + t.z, r: 0.5 * t.scale, nodeId });
       });
       trunkMesh.instanceMatrix.needsUpdate = true;
       leafMesh.instanceMatrix.needsUpdate = true;
+      // Referencia al chunk desde la propia malla, para poder identificar de
+      // qué chunk viene un árbol tocado al hacer raycast (ver handleTapForTargeting).
+      trunkMesh.userData.chunk = this;
+      leafMesh.userData.chunk = this;
       this.group.add(trunkMesh, leafMesh);
+      this.trunkMesh = trunkMesh;
+      this.leafMesh = leafMesh;
     }
 
     if (rockPositions.length > 0) {
@@ -501,6 +524,27 @@ class Chunk {
     }
   }
 
+  // Oculta (talado) o restaura (respawneado) UN árbol concreto de este chunk,
+  // sin tocar los demás — es la misma InstancedMesh, solo cambia una matriz.
+  setTreeDepleted(nodeId, depleted) {
+    const entry = this.treeByNodeId?.get(nodeId);
+    if (!entry) return;
+
+    if (depleted) {
+      dummy.position.set(0, -9999, 0); // fuera de la vista y del alcance del raycaster
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.setScalar(0.0001); // escala 0 exacta puede dar problemas de matriz singular en algunos casos
+      dummy.updateMatrix();
+      this.trunkMesh.setMatrixAt(entry.instanceIndex, dummy.matrix);
+      this.leafMesh.setMatrixAt(entry.instanceIndex, dummy.matrix);
+    } else {
+      this.trunkMesh.setMatrixAt(entry.instanceIndex, entry.trunkMatrix);
+      this.leafMesh.setMatrixAt(entry.instanceIndex, entry.leafMatrix);
+    }
+    this.trunkMesh.instanceMatrix.needsUpdate = true;
+    this.leafMesh.instanceMatrix.needsUpdate = true;
+  }
+
   dispose() {
     // InstancedMesh y PlaneGeometry compartidas no se destruyen (son reutilizadas),
     // solo se saca el grupo de la escena. Si un chunk usara geometría única,
@@ -512,6 +556,10 @@ class ChunkManager {
   constructor(scene) {
     this.scene = scene;
     this.loaded = new Map(); // key "cx,cz" -> Chunk
+    // Nodos (árboles) marcados como agotados por el servidor. Es GLOBAL (no
+    // por chunk) porque un chunk puede descargarse y volver a cargarse luego,
+    // y necesitamos recordar su estado real mientras tanto.
+    this.depletedNodeIds = new Set();
   }
 
   key(cx, cz) { return `${cx},${cz}`; }
@@ -531,6 +579,10 @@ class ChunkManager {
           const chunk = new Chunk(cx, cz);
           this.scene.add(chunk.group);
           this.loaded.set(k, chunk);
+          // Si alguno de los árboles de este chunk ya estaba talado (lo
+          // sabíamos de antes, por ejemplo porque nos alejamos y volvemos),
+          // aplicamos ese estado nada más crearlo.
+          for (const nodeId of this.depletedNodeIds) chunk.setTreeDepleted(nodeId, true);
         }
       }
     }
@@ -547,9 +599,23 @@ class ChunkManager {
     return { pcx, pcz };
   }
 
+  // Llamado desde la sincronización de red cuando el servidor confirma que un
+  // árbol se taló o volvió a crecer. Actualiza el chunk cargado (si lo está)
+  // y recuerda el estado para cuando ese chunk se cargue de nuevo más tarde.
+  setNodeDepleted(nodeId, depleted) {
+    if (depleted) this.depletedNodeIds.add(nodeId);
+    else this.depletedNodeIds.delete(nodeId);
+    for (const chunk of this.loaded.values()) chunk.setTreeDepleted(nodeId, depleted);
+  }
+
   getAllObstacles() {
     const all = [];
-    for (const chunk of this.loaded.values()) all.push(...chunk.obstacles);
+    for (const chunk of this.loaded.values()) {
+      for (const obs of chunk.obstacles) {
+        if (obs.nodeId && this.depletedNodeIds.has(obs.nodeId)) continue; // árbol talado: ya no bloquea el paso
+        all.push(obs);
+      }
+    }
     return all;
   }
 }
@@ -641,6 +707,10 @@ function createLootBagMesh() {
   return group;
 }
 
+// Nota: ya no hace falta una malla especial para "árboles talables" — ahora
+// CUALQUIER árbol decorativo del chunk es un árbol real (ver ChunkManager /
+// Chunk.setTreeDepleted), así que no hay distinción visual que mantener aquí.
+
 function createCreatureMesh() {
   const group = new THREE.Group();
 
@@ -700,6 +770,9 @@ const ISO_BILLBOARD_ANGLE = Math.PI / 4; // ángulo fijo de la cámara isométri
 const remotePlayers = new Map(); // sessionId -> { group, targetX, targetZ, targetRotY }
 const creatures = new Map();     // creatureId -> { group, targetX, targetZ, targetRotY, aiState }
 const lootBags = new Map();      // bagId -> { group, state }
+// Nota: ya no hay un Map "resourceNodes" con mallas propias — los árboles
+// viven directamente en cada Chunk (ver ChunkManager.setNodeDepleted), no
+// como entidades de red aparte con su propio mesh individual.
 let openLootBagId = null;        // bolsa actualmente mostrada en el panel, si hay alguna
 let room = null;
 let mySessionId = null;
@@ -745,6 +818,9 @@ function getOrCreatePlayerId() {
 // Limpia todas las entidades remotas dibujadas (jugadores, criaturas, bolsas)
 // antes de volver a sincronizar tras una reconexión — evita duplicados si el
 // estado se vuelve a decodificar entero desde cero.
+// (Los árboles NO se limpian aquí: viven dentro de los Chunks ya cargados,
+// que no dependen de la conexión de red, y volver a recibir el mismo estado
+// de "talado/no talado" tras reconectar es una operación segura de repetir.)
 function clearRemoteEntities() {
   for (const entry of remotePlayers.values()) scene.remove(entry.group);
   remotePlayers.clear();
@@ -864,6 +940,17 @@ function attachRoomHandlers(room) {
     }
     // Si la bolsa que teníamos abierta en el panel desaparece (se vació), cerramos el panel.
     if (openLootBagId === bagId) closeLootPanel();
+  });
+
+  // Árboles reales del mundo: el servidor los identifica por chunk+índice
+  // (tree_{cx}_{cz}_{i}) y solo nos dice si están talados o no. El propio
+  // ChunkManager decide qué hacer visualmente (ocultar/mostrar la instancia
+  // correcta dentro del InstancedMesh del chunk que corresponda).
+  $(room.state).resourceNodes.onAdd((nodeState, nodeId) => {
+    chunkManager.setNodeDepleted(nodeId, nodeState.depleted);
+    $(nodeState).onChange(() => {
+      chunkManager.setNodeDepleted(nodeId, nodeState.depleted);
+    });
   });
 }
 
@@ -1126,7 +1213,26 @@ function handleTapForTargeting(clientX, clientY) {
     return;
   }
 
-  // Si no tocamos una bolsa, y estamos en modo guerra, comprobamos criaturas para targeting.
+  // Árboles reales del mundo: igual que el loot, no requiere modo guerra —
+  // recolectar es una acción de paz, no de combate. Hacemos raycast contra
+  // los InstancedMesh de tronco/copa de cada chunk cargado (mucho más barato
+  // que tener una malla por árbol, con cientos de árboles en pantalla).
+  const treeMeshes = [];
+  for (const chunk of chunkManager.loaded.values()) {
+    if (chunk.trunkMesh) treeMeshes.push(chunk.trunkMesh, chunk.leafMesh);
+  }
+  const nodeHits = raycaster.intersectObjects(treeMeshes, false);
+  if (nodeHits.length > 0) {
+    const hit = nodeHits[0];
+    const chunk = hit.object.userData.chunk;
+    const nodeId = chunk?.nodeIdByInstanceIndex?.[hit.instanceId];
+    if (nodeId) {
+      room.send('gatherNode', { nodeId });
+      return;
+    }
+  }
+
+  // Si no tocamos nada de lo anterior, y estamos en modo guerra, comprobamos criaturas para targeting.
   if (!warModeActive) return;
 
   const creatureBodies = [];
